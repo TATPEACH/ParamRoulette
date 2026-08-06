@@ -89,8 +89,11 @@ private:
     juce::ComboBox     cbSemantic;
     juce::Label        lMotionAmt { {}, "运动"_u8 }, lToneAmt { {}, "音色"_u8 };
     juce::Slider       sMotionAmt, sToneAmt;
-    juce::TextButton   bLockBase    { "锁定基座"_u8 };
-    juce::TextButton   bRestoreBase { "回到基座"_u8 };
+    // 「设为基座」/「还原基座」两个按钮以前叫「锁定基座」/「回到基座」——
+    // 四个字、结构相同、并排放，扫一眼分不出哪个是"存"哪个是"取"。
+    // 现在动词不同（设 / 还原），而且已设定后第一个会变成「重设基座」。
+    juce::TextButton   bLockBase    { "设为基座"_u8 };
+    juce::TextButton   bRestoreBase { "还原基座"_u8 };
     juce::Label        lProfile;
 
     juce::TextEditor   teFilter;

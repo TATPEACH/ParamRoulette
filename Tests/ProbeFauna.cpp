@@ -833,6 +833,150 @@ int main (int argc, char** argv)
         }
     }
 
+    head ("13. DOES setStateInformation CLOBBER LIVE PARAM EDITS?");
+
+    {
+        // 假设：fauna 的 getStateInformation 返回的是**整个 bank**（FBCh，128 个 program），
+        // 而 bank 里存的是 program 的**已保存值**，不是你现在听到的实时值。
+        // 那么 setStateInformation 会让它从 bank 重载当前 program，
+        // 把实时编辑全丢掉——生成变体每次都会"变回 preset 原样"。
+        plugin->setCurrentProgram (9);           // bird 5
+        pump (200);
+        pr::refreshValues (*plugin, model);
+
+        const int ti = findByName (model, "tens");
+        const int mi = findByName (model, "mem x pos");
+        if (ti < 0 || mi < 0) { line ("  tracked params not found"); }
+        else
+        {
+            auto* pt = plugin->getParameters()[model.getReference (ti).index];
+            auto* pm = plugin->getParameters()[model.getReference (mi).index];
+
+            const float t0 = pt->getValue(), m0 = pm->getValue();
+            line ("  preset 值      : tens " + String (t0, 4) + "   mem x " + String (m0, 4));
+
+            // 改成明显不同的值
+            const float tWant = (t0 > 0.5f) ? 0.20f : 0.80f;
+            const float mWant = (m0 > 0.5f) ? 0.15f : 0.85f;
+            pt->setValueNotifyingHost (tWant);
+            pm->setValueNotifyingHost (mWant);
+            pump (200);
+            line ("  手动改成       : tens " + String (pt->getValue(), 4)
+                  + "   mem x " + String (pm->getValue(), 4));
+
+            // 纯往返：读状态，原样写回，什么都不改
+            MemoryBlock st;
+            plugin->getStateInformation (st);
+            plugin->setStateInformation (st.getData(), (int) st.getSize());
+            pump (250);
+
+            const float t1 = pt->getValue(), m1 = pm->getValue();
+            line ("  原样往返之后   : tens " + String (t1, 4) + "   mem x " + String (m1, 4));
+
+            const bool clobbered = std::abs (t1 - tWant) > 1.0e-3f || std::abs (m1 - mWant) > 1.0e-3f;
+            const bool backToPreset = std::abs (t1 - t0) < 1.0e-3f && std::abs (m1 - m0) < 1.0e-3f;
+
+            line();
+            line (String ("  RESULT: ") + (clobbered
+                    ? (backToPreset ? "CONFIRMED - 往返把实时编辑冲回了 preset 原值"
+                                    : "CLOBBERED - 实时编辑被改掉了（但没回到 preset 值）")
+                    : "clean - 往返不影响实时值，假设不成立"));
+
+            if (clobbered)
+                line ("  => randomiseContours 里的 setStateInformation 会造成同样的后果，"
+                      "必须在它之后把实时值写回去");
+        }
+    }
+
+    head ("14. REPRO: lock A -> edit -> lock B -> generate. Result near A or B?");
+
+    {
+        plugin->setCurrentProgram (9);
+        pump (200);
+        pr::refreshValues (*plugin, model);
+
+        const auto profileR = pr::detectProfile (model);
+
+        // —— 锁基座 A
+        auto A = pr::captureSnapshot (*plugin, "A");
+
+        // —— 手动把一批参数改成明显不同的值（模拟"我调出了一个新音色"）
+        //     挑的都是 profile 认出来的角色参数，applyMotion 会写它们
+        StringArray tracked { "tens", "mem x pos", "mem y pos", "n.lp", "throat f", "len" };
+        Array<int> mIdx;
+        for (const auto& nm : tracked)
+        {
+            const int k = findByName (model, nm);
+            if (k >= 0) mIdx.add (k);
+        }
+
+        for (int k : mIdx)
+        {
+            auto* p = plugin->getParameters()[model.getReference (k).index];
+            const float cur = p->getValue();
+            p->setValueNotifyingHost ((cur > 0.5f) ? 0.15f : 0.85f);   // 甩到另一头
+        }
+        pump (250);
+        pr::refreshValues (*plugin, model);
+
+        // —— 锁基座 B
+        auto B = pr::captureSnapshot (*plugin, "B");
+
+        line ("  参数            基座A      基座B");
+        for (int k : mIdx)
+        {
+            const auto pi = model.getReference (k).index;
+            line ("  " + model.getReference (k).name.paddedRight (' ', 14)
+                  + String (A.values[(size_t) pi], 4).paddedRight (' ', 11)
+                  + String (B.values[(size_t) pi], 4));
+        }
+
+        // —— 用基座 B 生成变体（和 randomizeNow 里的顺序完全一致）
+        Random rr (4242);
+        pr::MotionSettings ms;
+        ms.semantic = pr::MotionSemantic::Rise;
+        ms.motion = 0.65f;
+        ms.tone   = 0.0f;          // 关掉音色抖动，让比对干净
+
+        const int onlyGroup = profileR.looksLikeFauna ? 3 : -1;
+        const auto cr = pr::randomiseContours (*plugin, ms.semantic, ms.motion, rr,
+                                               &B.childState, onlyGroup,
+                                               plugin->getCurrentProgram());
+        line ();
+        line ("  randomiseContours: wrote " + String (cr.written)
+              + (cr.failed ? "  FAILED" : ""));
+
+        pr::applyMotion (*plugin, model, checked, profileR, B.values, ms, rr, cr.stages);
+        pump (250);
+        pr::refreshValues (*plugin, model);
+
+        // —— 结果离 A 近还是离 B 近？
+        line ();
+        line ("  参数            生成后     |离A|     |离B|    判定");
+        int nearA = 0, nearB = 0;
+        for (int k : mIdx)
+        {
+            const auto pi = model.getReference (k).index;
+            const float got = model.getReference (k).value;
+            const float dA = std::abs (got - A.values[(size_t) pi]);
+            const float dB = std::abs (got - B.values[(size_t) pi]);
+            const bool a = dA < dB;
+            if (a) ++nearA; else ++nearB;
+
+            line ("  " + model.getReference (k).name.paddedRight (' ', 14)
+                  + String (got, 4).paddedRight (' ', 11)
+                  + String (dA, 4).paddedRight (' ', 9)
+                  + String (dB, 4).paddedRight (' ', 8)
+                  + (a ? "-> A  <-- BUG" : "-> B  ok"));
+        }
+
+        line ();
+        line ("  near A: " + String (nearA) + "   near B: " + String (nearB));
+        line (String ("  RESULT: ") + (nearB > nearA
+                ? "engine ok - generate does start from the newest base"
+                : "BUG CONFIRMED IN ENGINE - generate falls back to the older base"));
+    }
+
     head ("DONE");
     pr::restoreSnapshot (base, *plugin);
     plugin->releaseResources();

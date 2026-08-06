@@ -385,6 +385,8 @@ void ParamRouletteProcessor::rebuildModel()
     bank.resetWinner();
     motionBase = Snapshot {};
     motionBaseProgram = -1;
+    motionBaseName.clear();
+    motionBaseGeneration = 0;
     motionProfile = {};
 
     if (hosted == nullptr)
@@ -459,12 +461,12 @@ void ParamRouletteProcessor::randomizeNow()
     if (motionMode)
     {
         // 基座没锁就先锁一份当前状态。用户按下"掷"的那一刻手上的音色就是他要的
-        // 出发点——逼他先点一下"锁定基座"只是多一道仪式。
+        // 出发点——逼他先点一下「设为基座」只是多一道仪式。
+        //
+        // 走 lockMotionBase() 而不是就地 captureSnapshot：基座相关的字段有四个
+        // （快照 / program / 名字 / 计数），分两处赋值迟早会漏掉一个。
         if (! motionBase.used)
-        {
-            motionBase = captureSnapshot (*hosted, "基座"_u8);
-            motionBaseProgram = hosted->getCurrentProgram();
-        }
+            lockMotionBase();
 
         // **顺序不能反**：轮廓走的是 setStateInformation，它会把整个状态
         // （包括所有参数值）覆盖成状态块里的内容。所以先改曲线写回，再改参数。
@@ -574,6 +576,8 @@ void ParamRouletteProcessor::setHostedProgram (int index)
     // **不自动重锁**——锁定是用户的决定；下次「生成变体」会自动锁当前状态。
     motionBase = Snapshot {};
     motionBaseProgram = -1;
+    motionBaseName.clear();
+    motionBaseGeneration = 0;
 
     refreshModelValues();
     ++structureGeneration;      // 178 个值全变了，整表重画
@@ -594,8 +598,30 @@ bool ParamRouletteProcessor::lockMotionBase()
 
     motionBase = captureSnapshot (*hosted, "基座"_u8);
     motionBaseProgram = hosted->getCurrentProgram();
+    motionBaseName = getHostedProgramName (motionBaseProgram);
+    ++motionBaseGeneration;
+
     sendChangeMessage();
     return true;
+}
+
+juce::String ParamRouletteProcessor::getMotionBaseLabel() const
+{
+    if (! motionBase.used)
+        return "未设定"_u8;
+
+    juce::String s;
+
+    if (motionBaseName.isNotEmpty())
+        s << motionBaseName;
+    else if (motionBaseProgram >= 0)
+        s << "program "_u8 << motionBaseProgram;
+    else
+        s << "当前状态"_u8;
+
+    // #N 是重锁计数。点一次「重设基座」这个数就该 +1；不变就说明没生效。
+    s << " #" << motionBaseGeneration;
+    return s;
 }
 
 bool ParamRouletteProcessor::restoreMotionBase()
@@ -616,6 +642,12 @@ void ParamRouletteProcessor::restoreMotionBaseFromTree (const juce::ValueTree& t
     // HOSTED/state 还原过了，再写一遍基座会把用户存工程前的改动抹掉。
     motionBase = t.hasType (ids::BASE) ? snapshotFromValueTree (t) : Snapshot {};
     motionBaseProgram = (motionBase.used && hosted != nullptr) ? hosted->getCurrentProgram() : -1;
+
+    // 标签故意写成一眼能认出来的样子。宿主在意料之外的时机重放状态时
+    // （撤销、桥进程重启、复制 FX），基座会被这里换掉——界面上看到
+    // "工程恢复 #0" 就说明发生了这件事，而不是"我锁的基座没生效"。
+    motionBaseName = motionBase.used ? "工程恢复"_u8 : juce::String();
+    motionBaseGeneration = 0;
 }
 
 void ParamRouletteProcessor::captureSlot (int slot)

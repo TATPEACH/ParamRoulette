@@ -9,12 +9,53 @@ set_property(GLOBAL PROPERTY USE_FOLDERS YES)
 if (MSVC)
     # 源码里有中文字符串字面量。不加 /utf-8 的话 MSVC 按系统代码页（GBK）解释源文件，
     # 界面上全是乱码；JUCE 的 String(const char*) 又假定入参是 UTF-8。
-    add_compile_options(/utf-8)
+    #
+    # /MP<N>：**这是唯一真正管用的编译并发开关。**
+    # JUCE 的 juce_recommended_config_flags 会加一个裸 `/MP`
+    # （见 JUCEHelperTargets.cmake:123），它按逻辑核数派生子进程，而且
+    # **完全无视 MSBuild 的 -m**——所以 `cmake --build -- -m:4` 根本限不住编译并发，
+    # 只限住了同时构建几个项目。
+    #
+    # 满载时子进程 cl.exe 会崩，父进程报 `error D8040 创建子进程或与子进程通讯时出错`
+    # ——那个错误码是 /MP 专属的，没有 /MP 就不会出现。降低这个数既能减载，
+    # 也能让真正的编译错误以正常诊断的形式出现，而不是变成一句"子进程失联"。
+    set(PR_COMPILE_JOBS "6" CACHE STRING
+        "并行编译进程数（覆盖 JUCE 的裸 /MP = 逻辑核数）。构建不稳就调小，比如 2")
+    add_compile_options(/utf-8 /MP${PR_COMPILE_JOBS})
+    message(STATUS "ParamRoulette: 编译并发 /MP${PR_COMPILE_JOBS}")
 endif()
 
 # 构建后把 .vst3 拷到 C:\Program Files\Common Files\VST3 需要管理员权限，
 # 所以默认关掉。要开就 -DPR_COPY_AFTER_BUILD=ON 并用管理员身份构建。
 option(PR_COPY_AFTER_BUILD "构建后把 .vst3 装到系统 VST3 目录（需要管理员权限）" OFF)
+
+# ---------------------------------------------------------------- LTO
+# 默认**关掉**全程序优化。
+#
+# 理由很简单：LTCG 的代码生成阶段是整个构建里最重的一步（单线程、吃内存、
+# 持续满载几分钟），而这个项目的音频热路径就是把 buffer 转手给子插件，
+# LTO 的收益近乎为零。想开就 -DPR_ENABLE_LTO=ON。
+#
+# 下面这段是踩坑记录，留着免得以后再走一遍弯路。
+#
+# 开发期间这台机器上反复出现 `fatal error C1001: 内部编译器错误`，报错位置
+# 每次都不一样（tuple / pngrtran.c / jfdctint.c / xmemory / hb-iter.hh），
+# 外加 `D8040 创建子进程或与子进程通讯时出错`，还蓝屏两次
+# （0x1E KMODE_EXCEPTION_NOT_HANDLED、0x7F arg1=8 双重错误）。
+#
+# 先后误判成两件事，**两个都不对**：
+#   1. "MSVC 19.50 的 LTCG 后端 bug" —— 因为报错发生在"正在生成代码"阶段、
+#      编译器内部路径是 Utc/src/p2（后端代码生成器）。看着很像，但不是。
+#   2. "i7-14700KF 硅劣化" —— 13/14 代 K 系列确实有公认的稳定性缺陷，
+#      而且我查到微码已是最新的 0x12F，就推断是已经劣化。也不是。
+#
+# 真正原因：内存 XMP 从 profile 1 调到了 profile 2。改回去就好了。
+#
+# 教训值得记下来：`Win32_PhysicalMemory` **不暴露时序**。我查到"额定 3200、
+# 实配 3200，没超频"就据此排除了内存——那是错的推理，同频率下更紧的时序在
+# WMI 里长得一模一样。**随机位置的编译器 ICE + 重负载下双重错误，
+# 第一嫌疑永远是内存**，别绕到编译器或 CPU 上去。
+option(PR_ENABLE_LTO "开启全程序优化（LTCG）。它是构建里最重的一步，收益对本项目近乎为零" OFF)
 
 # ---------------------------------------------------------------- VST2
 # JUCE 8 的 juce_VSTPluginFormat.cpp 硬性 include <pluginterfaces/vst2.x/aeffect.h>，
@@ -159,8 +200,12 @@ foreach (target ParamRoulette ParamRouletteSynth)
             juce::juce_audio_utils      # 连带 audio_processors / audio_devices / gui_extra
         PUBLIC
             juce::juce_recommended_config_flags
-            juce::juce_recommended_lto_flags
             juce::juce_recommended_warning_flags)
+
+    # LTO 默认关，见文件开头 PR_ENABLE_LTO 的说明（MSVC 19.50 的 LTCG 会崩）
+    if (PR_ENABLE_LTO)
+        target_link_libraries(${target} PUBLIC juce::juce_recommended_lto_flags)
+    endif()
 
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/Source" PREFIX Source
                  FILES ${PR_SOURCES} ${PR_HEADERS})

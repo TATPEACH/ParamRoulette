@@ -159,14 +159,16 @@ ParamRouletteEditor::ParamRouletteEditor (ParamRouletteProcessor& p)
 
     bLockBase.onClick = [this]
     {
-        note = proc.lockMotionBase() ? "基座已锁定：之后每次生成都从这里出发"_u8
-                                     : "锁定失败：没有加载插件"_u8;
+        note = proc.lockMotionBase()
+                 ? ("基座 → "_u8 + proc.getMotionBaseLabel())
+                 : "设定失败：没有加载插件"_u8;
     };
     addAndMakeVisible (bLockBase);
 
     bRestoreBase.onClick = [this]
     {
-        note = proc.restoreMotionBase() ? "已回到基座"_u8 : "回到基座失败：基座未锁定"_u8;
+        note = proc.restoreMotionBase() ? ("已还原到基座 "_u8 + proc.getMotionBaseLabel())
+                                        : "还原失败：基座未设定"_u8;
     };
     addAndMakeVisible (bRestoreBase);
 
@@ -688,9 +690,10 @@ void ParamRouletteEditor::updateStatus()
         prof << (cg > 0 ? ("  ·  曲线可写 "_u8 + juce::String (cg) + " 条"_u8)
                         : juce::String ("  ·  曲线不可写（格式不认识）"_u8));
 
+        // 基座身份必须显示出来。只写"已锁定"的话，"我到底锁没锁上、锁的是哪一个"
+        // 完全看不出来——出问题时既没法自查也没法报告。#N 每次重设 +1。
         if (motion)
-            prof << (proc.hasMotionBase() ? "  ·  基座已锁定"_u8
-                                          : "  ·  基座未锁定（第一次生成时自动锁当前状态）"_u8);
+            prof << "  ·  基座："_u8 << proc.getMotionBaseLabel();
     }
     lProfile.setText (prof, juce::dontSendNotification);
     lProfile.setColour (juce::Label::textColourId,
@@ -717,6 +720,9 @@ void ParamRouletteEditor::updateStatus()
     sToneAmt    .setEnabled (has && motion);
     bLockBase   .setEnabled (has && motion);
     bRestoreBase.setEnabled (has && motion && proc.hasMotionBase());
+
+    // 已设定之后动词换成"重设"，一眼能看出这一下是**覆盖**不是首次设定
+    bLockBase.setButtonText (proc.hasMotionBase() ? "重设基座"_u8 : "设为基座"_u8);
 
     for (int i = 0; i < kNumSlots; ++i)
         slotUI[(size_t) i].capture.setEnabled (has);

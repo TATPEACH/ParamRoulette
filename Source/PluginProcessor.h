@@ -148,6 +148,13 @@ public:
     bool restoreMotionBase();
     bool hasMotionBase() const noexcept             { return motionBase.used; }
 
+    /** 基座的身份标签，形如 `bird 5 #3`。
+
+        **界面必须显示它。** 之前只有一个"基座已锁定"，导致"我到底锁没锁上、
+        锁的是哪一个"完全看不出来——出问题时既没法自查也没法报告。
+        `#N` 每次重锁 +1，所以点一下「重设基座」这个数就该变；不变就是没生效。 */
+    juce::String getMotionBaseLabel() const;
+
     /** 从工程状态里恢复基座。只在 applyPendingState 的加载回调里用——
         必须在 installHosted 把基座清掉**之后**才轮到它。 */
     void restoreMotionBaseFromTree (const juce::ValueTree&);
@@ -230,6 +237,8 @@ private:
     MotionResult   lastMotion;
     Snapshot       motionBase;
     int            motionBaseProgram = -1;  ///< 锁定基座时插件在哪个 program
+    juce::String   motionBaseName;          ///< 锁定时那个 program 的名字
+    int            motionBaseGeneration = 0;///< 重锁次数，界面上显示成 #N
     int            lastContoursWritten = 0;
     int            contourGroups = 0;
 
