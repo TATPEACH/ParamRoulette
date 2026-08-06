@@ -1,0 +1,42 @@
+# ---- 构建产物 ----
+# build/ 和 build32/ 各 2.5G 左右（FetchContent 拉下来的 JUCE 源码占大头）
+build/
+build32/
+out/
+cmake-build-*/
+
+# ---- VST2 SDK ----
+# vst2sdk/pluginterfaces/ 里是 Steinberg 的 aeffect.h / aeffectx.h。
+# Steinberg 2018 年 10 月起停发 VST2 授权，所以这两个文件**不进版本库**——
+# 免得哪天 push 到公开仓库就变成了分发行为。
+#
+# 恢复办法见 vst2sdk/README.md（那个文件是**入库**的）。
+# 32 位构建缺了它会直接 FATAL_ERROR 并把需要的路径打出来，不会静默降级。
+vst2sdk/pluginterfaces/
+
+# ---- 探针 / 调试的中间产物 ----
+# probe_out*.txt 是无头验收测试的输出，随时能重跑生成。
+# fauna_state.bin 是 fauna 的状态块 dump（第三方插件数据）。
+*.log
+probe_out*.txt
+probe_final.txt
+fauna_state.bin
+
+# ---- 录屏 / 截图 ----
+# 媒体文件一旦进 git 就永久留在历史里，而且这种目录只会越滚越大。
+# 想把录屏一起管起来就删掉这一行（或者上 git-lfs）。
+Capture/
+
+# ---- 编辑器 / 系统 ----
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- Claude Code 本机设置 ----
+# 这个文件记的是本机的权限白名单，不该跟着仓库跑。
+.claude/settings.local.json
