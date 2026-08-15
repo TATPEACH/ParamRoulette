@@ -257,6 +257,132 @@ summary() = 包络 4 组 / 47 项（含 ADSR 8 段）  ·  音高 11  ·  音色
 
 **以后加中文字面量必须带 `_u8` 后缀**，否则又是乱码。纯 ASCII 的不用加。
 
+**现在有工具专门查这个**：`node Tools/check_utf8_literals.mjs`。
+它认 `_u8` 后缀和 `String::fromUTF8()` 两种安全写法，跳过注释 / 字符字面量 /
+预处理行，并且知道相邻字面量会拼接（后缀只需在最后一个上）。
+当前状态：**30 个文件全部干净**。
+
+写这个工具时它先报了一处误判——`ParamListView.cpp:283` 的 `"→ "`，
+实际上那行用的是 `juce::String::fromUTF8`，是安全的。**看了才改**，
+没有盲目"修"掉一个本来正确的地方。
+
+---
+
+## 本轮新增（工作流 + 多插件链）
+
+### 无头测试：48 项纯逻辑检查，两个架构都跑
+
+最容易出错的三块逻辑被抽成不依赖 `JucePlugin_*` 宏的独立单元，
+这样才进得了探针（`PluginProcessor` 链不进去）。测试在
+`Tests/ProbeFauna.cpp` 的 **section 0**，**不需要任何插件**：
+
+```
+=== 0. PURE LOGIC (no plugin needed) ===
+  HistoryRing（回退/前进的游标算术）        12 项
+  subsample（每次只动 N 个）                 5 项
+  OutputGuard（链尾安全网，纯 DSP）          9 项
+  ChainRunner（串联 / 旁通 / 声道不足）      17 项
+  快照身份校验                                5 项
+  pure logic: ALL PASS
+```
+
+几项值得单独说，都是"错了不崩、只会悄悄不对"的那类：
+
+| 检查 | 防的是什么 |
+|---|---|
+| `push after undo truncated the future` | 回退后再掷一次，旧的"下一个"必须被砍掉，否则「▶」会走到一条已经被覆盖的分支 |
+| `cursor follows pop_front (back gives T9)` | 历史超上限丢头部时游标要一起前移，不移就会指向另一条记录 |
+| `every candidate is reachable (no off-by-one bias)` | 部分 Fisher-Yates 写错一个下标会让最后一个候选永远选不到——500 次抽样验证 10 个候选都出现过 |
+| `audio passes through every link in order` | 三个"加常数"的假插件串起来必须得 0+1+2+4 = **7**。只有真串对了才是 7 |
+| `insufficient scratch is reported, not overrun` | 暂存区不够时必须跳过而**不是越界写**，并且验证插件根本没被调用 |
+| `gain persists across blocks` | limiter 的增益跨块保持。每块重置成 1.0 的话，持续超标的信号会在每个块边界重新过冲，听起来是周期性爆裂 |
+
+### 链尾安全网的实测
+
+```
+输入 40.0（+32 dB，典型的反馈炸开）→ 输出 ≤ 0.891（−1 dBFS）   ✓
+输入 1.0e6                          → 输出 ≤ 0.891，且全部有限   ✓
+输入含 NaN / +Inf / −Inf            → 全部清零，latch 报警        ✓
+guard 关掉时灌 NaN                  → **仍然清零**                ✓
+输入 0.25（knee 以下）              → 原样输出，误差 < 1e-6       ✓
+```
+
+最后一条是"透明性"：天花板以下 80% 的电平完全不碰。
+全程 `tanh` 的话 u=0.5 处就有 4% 误差，那是把所有正常电平都染色了。
+
+### 快照身份校验（修掉一个我自己引入的 bug）
+
+多插件链**引入了一个单插件时代不存在的 bug**：`restoreSnapshot` 原来直接
+把 `childState` 喂给传进来的插件，不做任何校验。有了 6 个链位之后，
+"在链位 1 存快照、切到链位 2 召回"只差一次点击，而那团字节只有原插件认得。
+
+修法是记下身份并在还原前校验：
+
+```
+snapshot records the plugin it came from        ✓
+legacy snapshot (no id) is left permissive      ✓   老工程放行（那时链上只有一位）
+plugin id survives the ValueTree round trip     ✓   重开工程后校验依然有效
+```
+
+`applyMorph` 原来只比参数**个数**——同厂姊妹产品、同插件两个版本参数数相同
+一点都不罕见，那时插值出来的是两组无关值的平均。现在先比身份再比长度。
+
+### 32 位回归：refactor 没碰坏 fauna 那条路
+
+重构（单插件 → 6 链位数组）之后重跑 32 位探针，14 组全绿、退出码 0：
+
+```
+instantiated       : OK          参数 178
+ok / endpoint-only / inert / untested : 151 / 23 / 0 / 4
+低强度 0.30 翻转率：as Continuous 0/40  →  as Toggle 4/40
+contour groups     : 4   <-- recognised
+  EG3 untouched    : YES  OK
+  plugin blob param changed : YES
+基座测试 near A: 1   near B: 5   → engine ok
+UTF-8: RESULT: PASS - no mojibake
+```
+
+三条原始验收标准（fauna 能加载 / 参数能随机 / 曲线能随机）**在重构后依然成立**。
+
+### 工程状态 v2 → v3
+
+`HOSTED` 从单个子节点变成多个、每个带 `slot` 属性。
+**版本判据是"HOSTED 有没有 slot 属性"**——v2 只有一个且没有它。
+
+| | v2 存在哪 | v3 存在哪 |
+|---|---|---|
+| 子插件 desc / state | 唯一那个 `HOSTED` | 每个 `HOSTED`（带 `slot`） |
+| 勾选表 `excluded` | **根**上 | 各自的 `HOSTED` 里 |
+| 运动基座 `MotionBase` | **根**上 | 各自的 `HOSTED` 里 |
+| 新增 | — | `focused` / `bypass` / `ceiling` / `guardOn` / `maxParams` |
+
+读 v2 工程时：唯一那个 HOSTED 装进链位 0，勾选表和基座从根上取。
+`ceiling` / `guardOn` 缺省成"开着、−1 dB"——**老工程升上来自动获得保护**。
+
+链位是**逐个顺序加载**的，不是一起发：`loading` 是一个标志，
+并发加载会被挡掉，结果只有第一个成功、剩下的静默丢失。
+某一位加载失败（插件卸载了 / 换机器了）**不中断整条链**，
+否则一个坏插件会让整个工程变空。
+
+### 产物（8 个，架构已核对 PE 头）
+
+| 架构 | 产物 |
+|---|---|
+| x86 | `ParamRoulette x86.vst3` / `ParamRoulette Synth x86.vst3` + 两个 `.exe` |
+| x64 | `ParamRoulette.vst3` / `ParamRoulette Synth.vst3` + 两个 `.exe` |
+
+两棵树全量重编，**零 error 零 warning**。
+
+### 还没做的（别当成做了）
+
+- **快照/morph 只覆盖当前聚焦的那一位**，不是整条链。切到别的链位召回会被
+  身份校验拦住（安全，但不是"链级 morph"）
+- **没有链预设文件**（`.prchain`）
+- **没有配方驱动的随机选插件**，没有"神奇按钮"
+- **没有逐参数抖动幅度**（codex 那张 B 表还是只能靠全局的两档 + 音色强度去逼近）
+- **没有插件功能标签**
+- **pluginval 没跑**（本机没装，需要先征得同意下载）
+
 ---
 
 代码已在 MSVC 14.50 / VS 18 2026 上编译通过。下面的测试**你自己跑**——

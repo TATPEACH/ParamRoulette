@@ -118,6 +118,8 @@ set(PR_SOURCES
     Source/SnapshotBank.cpp
     Source/MotionEngine.cpp
     Source/ContourIO.cpp
+    Source/ChainRunner.cpp
+    Source/OutputGuard.cpp
     Source/PluginScanner.cpp
     Source/HostedPluginWindow.cpp
     Source/ParamListView.cpp
@@ -130,8 +132,12 @@ set(PR_HEADERS
     Source/ParamModel.h
     Source/Randomizer.h
     Source/SnapshotBank.h
+    Source/HistoryRing.h
     Source/MotionEngine.h
     Source/ContourIO.h
+    Source/ChainRunner.h
+    Source/OutputGuard.h
+    Source/HostedSlot.h
     Source/PluginScanner.h
     Source/HostedPluginWindow.h
     Source/ParamListView.h
@@ -223,7 +229,9 @@ target_sources(pr_probe PRIVATE
     Source/Randomizer.cpp
     Source/SnapshotBank.cpp
     Source/MotionEngine.cpp
-    Source/ContourIO.cpp)
+    Source/ContourIO.cpp
+    Source/ChainRunner.cpp
+    Source/OutputGuard.cpp)
 
 target_include_directories(pr_probe PUBLIC Source ${PR_VST2_SDK})
 

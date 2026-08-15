@@ -26,9 +26,19 @@ namespace ids
     static const juce::Identifier semantic  { "motionSemantic" };
     static const juce::Identifier motionAmt { "motionAmount" };
     static const juce::Identifier toneAmt   { "toneAmount" };
+    static const juce::Identifier maxParams { "maxParams" };   // v3 起；v2 的工程里没有，缺省 0
 
     static const juce::Identifier desc      { "desc" };
     static const juce::Identifier state     { "state" };
+
+    // —— v3 起新增。
+    // `slot` 是**版本判据**：v2 只有一个 HOSTED 且没有这个属性，
+    // 所以"没有 slot 属性的 HOSTED 节点"就是老工程，装进链位 0。
+    static const juce::Identifier slot      { "slot" };
+    static const juce::Identifier bypass    { "bypass" };
+    static const juce::Identifier focused   { "focused" };
+    static const juce::Identifier ceiling   { "ceiling" };
+    static const juce::Identifier guardOn   { "guardOn" };
 }
 
 namespace
@@ -75,6 +85,25 @@ ParamRouletteProcessor::ParamRouletteProcessor()
                                                                "Morph Mode",
                                                                juce::StringArray { "1D", "2D" }, 0));
 
+    // 后加的三个。追加在末尾是安全的：VST3 宿主按参数 ID 匹配自动化，不按下标。
+    addParameter (pMotionAmt = new juce::AudioParameterFloat (juce::ParameterID { "motionAmt", 1 },
+                                                             "Motion", 0.0f, 1.0f, 0.65f));
+    addParameter (pToneAmt   = new juce::AudioParameterFloat (juce::ParameterID { "toneAmt", 1 },
+                                                             "Tone",   0.0f, 1.0f, 0.35f));
+    // 上限 64：再多就没有"只动几个"的意义了，而且给滑条一个有限量程才好拖。
+    addParameter (pMaxParams = new juce::AudioParameterInt (juce::ParameterID { "maxParams", 1 },
+                                                           "Max Params", 0, 64, 0));
+
+    // 链尾安全网。**默认开着**：随机化把反馈量拉满炸出 +40 dB 或 NaN 是完全
+    // 现实的结果，而爆音伤耳朵和监听设备。要关是用户的决定，不该是默认。
+    addParameter (pCeiling = new juce::AudioParameterFloat (juce::ParameterID { "ceiling", 1 },
+                                                           "Ceiling", -24.0f, 0.0f, -1.0f));
+    addParameter (pGuardOn = new juce::AudioParameterBool (juce::ParameterID { "guardOn", 1 },
+                                                          "Output Guard", true));
+
+    outputGuard.setCeilingDb (pCeiling->get());
+    outputGuard.setEnabled (pGuardOn->get());
+
     idxMorphX    = pMorphX->getParameterIndex();
     idxMorphY    = pMorphY->getParameterIndex();
     idxRandomize = pRandomize->getParameterIndex();
@@ -97,50 +126,68 @@ ParamRouletteProcessor::~ParamRouletteProcessor()
         p->removeListener (this);
 
     // editor 正常先于 processor 析构、钩子那时已经清空；这里是兜底。
+    // -1 = 全关。
     if (closeHostedWindow != nullptr)
-        closeHostedWindow();
+        closeHostedWindow (-1);
 
-    if (hosted != nullptr)
+    for (auto& s : chain)
     {
-        hosted->removeListener (this);
-        hosted->releaseResources();
+        if (s.plugin != nullptr)
+        {
+            s.plugin->removeListener (this);
+            s.plugin->releaseResources();
+        }
+        s.plugin.reset();
     }
-    hosted.reset();
 
     scanner.savePluginList();
 }
 
 //==============================================================================
+void ParamRouletteProcessor::prepareSlot (HostedSlot& s, double sampleRate, int samplesPerBlock)
+{
+    if (s.plugin == nullptr)
+    {
+        s.scratch.setSize (0, 0);
+        s.channels = 0;
+        return;
+    }
+
+    prepareHosted (*s.plugin, sampleRate, samplesPerBlock);
+
+    s.channels = juce::jmax (s.plugin->getTotalNumInputChannels(),
+                             s.plugin->getTotalNumOutputChannels());
+    s.scratch.setSize (juce::jmax (1, s.channels), juce::jmax (1, samplesPerBlock),
+                       false, true, true);
+}
+
 void ParamRouletteProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     const juce::ScopedLock sl (getCallbackLock());
 
-    if (hosted == nullptr)
-    {
-        hostedScratch.setSize (0, 0);
-        hostedChannels = 0;
-        setLatencySamples (0);
-        return;
-    }
+    for (auto& s : chain)
+        prepareSlot (s, sampleRate, samplesPerBlock);
 
-    prepareHosted (*hosted, sampleRate, samplesPerBlock);
+    outputGuard.prepare (sampleRate, getTotalNumOutputChannels());
+    outputGuard.setCeilingDb (pCeiling->get());
+    outputGuard.setEnabled (pGuardOn->get());
 
-    hostedChannels = juce::jmax (hosted->getTotalNumInputChannels(),
-                                 hosted->getTotalNumOutputChannels());
-    hostedScratch.setSize (juce::jmax (1, hostedChannels), juce::jmax (1, samplesPerBlock),
-                           false, true, true);
-
-    setLatencySamples (hosted->getLatencySamples());
+    updateChainLatency();
 }
 
 void ParamRouletteProcessor::releaseResources()
 {
     const juce::ScopedLock sl (getCallbackLock());
 
-    if (hosted != nullptr)
-        hosted->releaseResources();
+    for (auto& s : chain)
+    {
+        if (s.plugin != nullptr)
+            s.plugin->releaseResources();
 
-    hostedScratch.setSize (0, 0);
+        s.scratch.setSize (0, 0);
+    }
+
+    outputGuard.reset();
 }
 
 bool ParamRouletteProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -178,47 +225,54 @@ void ParamRouletteProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     for (int ch = numIn; ch < numOut; ++ch)
         buffer.clear (ch, 0, numSamples);
 
-    auto* p = hosted.get();
+    // 串联的机制在 ChainRunner 里（那边有无头测试：串联次序、旁通、空位、
+    // 延迟求和、声道不足走暂存区、暂存区不够时跳过而不越界）。
+    //
+    // MIDI 用同一个 buffer 串下去，所以前一位的 MIDI 输出会进到后一位——
+    // 这正是真实效果器链的行为。
+    std::array<ChainLink, kMaxChain> links;
+    for (size_t i = 0; i < links.size(); ++i)
+        links[i] = chain[i].link();
 
-    if (p == nullptr)
-        return;                 // 效果器版=直通；乐器版=静音。都是对的。
+    const auto r = runChain (links.data(), (int) links.size(), buffer, midi);
 
-    const int need = hostedChannels;
-    const int have = buffer.getNumChannels();
-
-    if (need <= have)
+    if (r.skipped > 0)
     {
-        p->processBlock (buffer, midi);
-        return;
-    }
-
-    // 子插件要的声道比宿主给的多（典型：把合成器挂进效果器版）。
-    // 直接把宿主的 buffer 丢过去它会越界读写，必须走暂存区。
-    if (hostedScratch.getNumChannels() < need || hostedScratch.getNumSamples() < numSamples)
-    {
-        // 只可能是 prepareToPlay 还没跑过。宁可不出声也不越界。
+        // 只可能是 prepareToPlay 还没跑过。宁可静音也不放出半条链的结果。
         buffer.clear();
-        return;
     }
 
-    for (int ch = 0; ch < need; ++ch)
-    {
-        if (ch < have) hostedScratch.copyFrom (ch, 0, buffer, ch, 0, numSamples);
-        else           hostedScratch.clear (ch, 0, numSamples);
-    }
-
-    // 这个 AudioBuffer 只是包住已有指针，不分配。
-    juce::AudioBuffer<float> view (hostedScratch.getArrayOfWritePointers(), need, 0, numSamples);
-    p->processBlock (view, midi);
-
-    for (int ch = 0; ch < have; ++ch)
-        buffer.copyFrom (ch, 0, hostedScratch, ch, 0, numSamples);
+    // 链尾安全网。**总是跑**——它内部会在 guard 关掉时只做 NaN 清洗。
+    // 随机化一个全通的反馈量炸出 +40 dB 或 NaN 是完全现实的结果，
+    // 而爆音伤耳朵、NaN 会顺着总线永久污染下游插件。
+    outputGuard.process (buffer);
 }
 
 double ParamRouletteProcessor::getTailLengthSeconds() const
 {
     const juce::ScopedLock sl (getCallbackLock());
-    return hosted != nullptr ? hosted->getTailLengthSeconds() : 0.0;
+
+    // const 方法里要拿非 const 的 link()，所以自己拼一份只读的。
+    std::array<ChainLink, kMaxChain> links;
+    for (size_t i = 0; i < links.size(); ++i)
+    {
+        links[i].plugin   = chain[i].plugin.get();
+        links[i].bypassed = chain[i].bypassed;
+    }
+
+    return chainTailSeconds (links.data(), (int) links.size());
+}
+
+void ParamRouletteProcessor::updateChainLatency()
+{
+    std::array<ChainLink, kMaxChain> links;
+    for (size_t i = 0; i < links.size(); ++i)
+    {
+        links[i].plugin   = chain[i].plugin.get();
+        links[i].bypassed = chain[i].bypassed;
+    }
+
+    setLatencySamples (chainLatencySamples (links.data(), (int) links.size()));
 }
 
 juce::AudioProcessorEditor* ParamRouletteProcessor::createEditor()
@@ -227,9 +281,18 @@ juce::AudioProcessorEditor* ParamRouletteProcessor::createEditor()
 }
 
 //==============================================================================
-void ParamRouletteProcessor::loadPlugin (const juce::PluginDescription& desc, LoadCallback onDone)
+void ParamRouletteProcessor::loadPluginIntoSlot (int chainSlot,
+                                                 const juce::PluginDescription& desc,
+                                                 LoadCallback onDone)
 {
     JUCE_ASSERT_MESSAGE_THREAD
+
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
+    {
+        if (onDone != nullptr)
+            onDone ("链位号超出范围"_u8);
+        return;
+    }
 
     if (loading)
     {
@@ -248,8 +311,8 @@ void ParamRouletteProcessor::loadPlugin (const juce::PluginDescription& desc, Lo
 
     scanner.getFormatManager().createPluginInstanceAsync (
         desc, sr, bs,
-        [safe, desc, onDone] (std::unique_ptr<juce::AudioPluginInstance> inst,
-                              const juce::String& error)
+        [safe, desc, chainSlot, onDone] (std::unique_ptr<juce::AudioPluginInstance> inst,
+                                         const juce::String& error)
         {
             auto* self = safe.get();
 
@@ -266,7 +329,7 @@ void ParamRouletteProcessor::loadPlugin (const juce::PluginDescription& desc, Lo
                 return;
             }
 
-            self->installHosted (std::move (inst), desc);
+            self->installHosted (chainSlot, std::move (inst), desc);
 
             if (onDone != nullptr)
                 onDone ({});
@@ -281,25 +344,32 @@ void ParamRouletteProcessor::loadPluginById (const juce::String& identifier, Loa
         onDone ("插件表里没有这个插件，先扫描一遍"_u8);
 }
 
-void ParamRouletteProcessor::unloadPlugin()
+void ParamRouletteProcessor::unloadSlot (int chainSlot)
 {
-    installHosted (nullptr, {});
+    installHosted (chainSlot, nullptr, {});
 }
 
-void ParamRouletteProcessor::installHosted (std::unique_ptr<juce::AudioPluginInstance> next,
+void ParamRouletteProcessor::installHosted (int chainSlot,
+                                            std::unique_ptr<juce::AudioPluginInstance> next,
                                             const juce::PluginDescription& desc)
 {
     JUCE_ASSERT_MESSAGE_THREAD
+
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
+        return;
+
+    auto& slot = chain[(size_t) chainSlot];
 
     probe.cancel();
     stopTimer();
 
     // 顺序不能变：子插件的 editor 里全是指回实例的裸指针，实例先死必崩。
+    // 只关这一位的窗口——同时开着别的链位的界面是正常用法（调链要对比）。
     if (closeHostedWindow != nullptr)
-        closeHostedWindow();
+        closeHostedWindow (chainSlot);
 
-    if (hosted != nullptr)
-        hosted->removeListener (this);
+    if (slot.plugin != nullptr)
+        slot.plugin->removeListener (this);
 
     // 新实例的 prepare 和暂存区分配都放在拿锁**之前**——分配是会阻塞的，
     // 拿着 callbackLock 分配等于让音频线程等 malloc。
@@ -323,10 +393,10 @@ void ParamRouletteProcessor::installHosted (std::unique_ptr<juce::AudioPluginIns
     suspendProcessing (true);
     {
         const juce::ScopedLock sl (getCallbackLock());
-        old = std::move (hosted);
-        hosted = std::move (next);
-        hostedChannels = nextChannels;
-        std::swap (hostedScratch, nextScratch);   // 三次 move，不分配
+        old = std::move (slot.plugin);
+        slot.plugin = std::move (next);
+        slot.channels = nextChannels;
+        std::swap (slot.scratch, nextScratch);   // 三次 move，不分配
     }
     suspendProcessing (false);
 
@@ -334,87 +404,175 @@ void ParamRouletteProcessor::installHosted (std::unique_ptr<juce::AudioPluginIns
     // nextScratch 现在装着旧缓冲，在函数尾自然释放，也在锁外。
     old.reset();
 
-    hostedDesc = desc;
+    slot.desc = desc;
 
-    rebuildModel();
+    rebuildModel (chainSlot);
     ++structureGeneration;
 
-    if (hosted != nullptr)
-    {
-        hosted->addListener (this);
-        setLatencySamples (hosted->getLatencySamples());
+    if (slot.plugin != nullptr)
+        slot.plugin->addListener (this);
+
+    updateChainLatency();
+
+    // 链上还有别的插件在的话 morph 定时器要继续跑。
+    if (getNumLoadedSlots() > 0)
         startTimerHz (kMorphHz);
-    }
-    else
-    {
-        setLatencySamples (0);
-    }
 
     hostedValuesDirty.store (true, std::memory_order_relaxed);
     sendChangeMessage();
 }
 
 //==============================================================================
+void ParamRouletteProcessor::setFocusedSlot (int chainSlot)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain) || chainSlot == focused)
+        return;
+
+    // 体检是对**某一个**插件跑的，换了聚焦目标就必须先停，否则它会继续
+    // 往上一个插件里写探测值，而界面已经在显示另一个插件的模型了。
+    probe.cancel();
+
+    focused = chainSlot;
+
+    refreshModelValues();
+    ++structureGeneration;      // 整张参数表换了一个插件，全表重建
+    sendChangeMessage();
+}
+
+bool ParamRouletteProcessor::isSlotLoaded (int chainSlot) const
+{
+    return juce::isPositiveAndBelow (chainSlot, kMaxChain)
+        && chain[(size_t) chainSlot].plugin != nullptr;
+}
+
+juce::AudioPluginInstance* ParamRouletteProcessor::getSlotPlugin (int chainSlot) const
+{
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
+        return nullptr;
+
+    return chain[(size_t) chainSlot].plugin.get();
+}
+
+juce::String ParamRouletteProcessor::getSlotName (int chainSlot) const
+{
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
+        return {};
+
+    const auto& s = chain[(size_t) chainSlot];
+
+    if (s.plugin != nullptr)
+        return s.plugin->getName();
+
+    return s.desc.name;
+}
+
+bool ParamRouletteProcessor::isSlotBypassed (int chainSlot) const
+{
+    return juce::isPositiveAndBelow (chainSlot, kMaxChain)
+        && chain[(size_t) chainSlot].bypassed;
+}
+
+void ParamRouletteProcessor::setSlotBypassed (int chainSlot, bool shouldBypass)
+{
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
+        return;
+
+    auto& s = chain[(size_t) chainSlot];
+
+    if (s.bypassed == shouldBypass)
+        return;
+
+    // bool 的写入是原子的，音频线程读到旧值最多是多跑/少跑一块，不会崩。
+    // 为此拿 callbackLock 得不偿失。
+    s.bypassed = shouldBypass;
+
+    updateChainLatency();       // 旁通的那一位不再贡献延迟
+    sendChangeMessage();
+}
+
+int ParamRouletteProcessor::getNumLoadedSlots() const
+{
+    int n = 0;
+    for (const auto& s : chain)
+        if (s.plugin != nullptr)
+            ++n;
+    return n;
+}
+
+//==============================================================================
 juce::String ParamRouletteProcessor::getHostedName() const
 {
-    if (hosted != nullptr)
-        return hosted->getName();
-
-    return hostedDesc.name;
+    return getSlotName (focused);
 }
 
 juce::String ParamRouletteProcessor::getHostedId() const
 {
-    if (hostedDesc.name.isEmpty() && hostedDesc.fileOrIdentifier.isEmpty())
+    const auto& d = cur().desc;
+
+    if (d.name.isEmpty() && d.fileOrIdentifier.isEmpty())
         return {};
 
-    return hostedDesc.createIdentifierString();
+    return d.createIdentifierString();
 }
 
-void ParamRouletteProcessor::rebuildModel()
+void ParamRouletteProcessor::rebuildModel (int chainSlot)
 {
-    model.clear();
-    checked.clear();
-    lastResult = {};
-    lastMotion = {};
-    lastContoursWritten = 0;
-    contourGroups = 0;
-
-    // 换了插件，旧快照的参数数量和含义都对不上了。基座同理。
-    bank.clearAll();
-    bank.resetWinner();
-    motionBase = Snapshot {};
-    motionBaseProgram = -1;
-    motionBaseName.clear();
-    motionBaseGeneration = 0;
-    motionProfile = {};
-
-    if (hosted == nullptr)
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
         return;
 
-    model = buildModel (*hosted);
+    auto& slot = chain[(size_t) chainSlot];
 
-    checked.ensureStorageAllocated (model.size());
-    for (const auto& info : model)
-        checked.add (! info.defaultSkip());
+    // 换了插件，这一位的模型 / 勾选 / 基座 / 历史全部作废（但**不动旁通**：
+    // 那是用户对这个位置的设置）。
+    slot.resetForNewPlugin();
 
-    applyStoredExclusions();
+    if (chainSlot == focused)
+    {
+        lastResult = {};
+        lastMotion = {};
+    }
+
+    // 快照存的是整条链的状态，某一位换了插件就对不上了。
+    bank.clearAll();
+    bank.resetWinner();
+
+    if (slot.plugin == nullptr)
+        return;
+
+    slot.model = buildModel (*slot.plugin);
+
+    slot.checked.ensureStorageAllocated (slot.model.size());
+    for (const auto& info : slot.model)
+        slot.checked.add (! info.defaultSkip());
+
+    applyStoredExclusions (chainSlot);
 
     // 角色发现只看名字，不看当前值，所以建完模型就能算，不用等用户开运动模式。
-    motionProfile = detectProfile (model);
+    slot.profile = detectProfile (slot.model);
 
     // 这个插件的包络轮廓是不是可识别格式？只在加载时问一次——
     // 状态块可能有几百 KB，不该每次随机化都去数一遍。
     {
         juce::MemoryBlock probeState;
-        hosted->getStateInformation (probeState);
-        contourGroups = findContourGroups (probeState).size();
+        slot.plugin->getStateInformation (probeState);
+        slot.contourGroups = findContourGroups (probeState).size();
     }
 }
 
-void ParamRouletteProcessor::applyStoredExclusions()
+void ParamRouletteProcessor::applyStoredExclusions (int chainSlot)
 {
-    const auto id = getHostedId();
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
+        return;
+
+    auto& slot = chain[(size_t) chainSlot];
+    const auto& d = slot.desc;
+
+    if (d.name.isEmpty() && d.fileOrIdentifier.isEmpty())
+        return;
+
+    const auto id = d.createIdentifierString();
 
     // 没记过就用默认排除规则；记过的话它在**两个方向**上都说了算——
     // 包括用户把 wet/dry 这种默认排除项手动勾上的决定。
@@ -423,8 +581,8 @@ void ParamRouletteProcessor::applyStoredExclusions()
 
     const auto ex = scanner.loadExclusions (id);
 
-    for (int i = 0; i < model.size(); ++i)
-        checked.set (i, ! ex.contains (model.getReference (i).index));
+    for (int i = 0; i < slot.model.size(); ++i)
+        slot.checked.set (i, ! ex.contains (slot.model.getReference (i).index));
 }
 
 void ParamRouletteProcessor::saveExclusionsNow()
@@ -433,10 +591,13 @@ void ParamRouletteProcessor::saveExclusionsNow()
     if (id.isEmpty())
         return;
 
+    const auto& m = cur().model;
+    const auto& c = cur().checked;
+
     juce::Array<int> ex;
-    for (int i = 0; i < model.size(); ++i)
-        if (i < checked.size() && ! checked[i])
-            ex.add (model.getReference (i).index);
+    for (int i = 0; i < m.size(); ++i)
+        if (i < c.size() && ! c[i])
+            ex.add (m.getReference (i).index);
 
     scanner.saveExclusions (id, ex);
 }
@@ -444,19 +605,31 @@ void ParamRouletteProcessor::saveExclusionsNow()
 //==============================================================================
 void ParamRouletteProcessor::refreshModelValues()
 {
-    if (hosted != nullptr)
-        refreshValues (*hosted, model);
+    auto& s = cur();
+
+    if (s.plugin != nullptr)
+        refreshValues (*s.plugin, s.model);
 }
 
 void ParamRouletteProcessor::randomizeNow()
 {
-    if (hosted == nullptr)
+    auto& slot = cur();
+
+    if (slot.plugin == nullptr)
         return;
+
+    auto& plugin = *slot.plugin;
+
+    // 压历史必须在**任何**改动之前，而且在 refreshModelValues 之前也没关系——
+    // captureSnapshot 直接问插件要值和状态块，不看我们的 model 缓存。
+    pushHistory();
 
     // 先记下改动前的值，随机化之后才能在界面上显示"旧 → 新"。
     // 值本身可能已经陈旧（子插件界面被拖过），先刷一遍再记。
     refreshModelValues();
-    snapshotPrevValues (model);
+    snapshotPrevValues (slot.model);
+
+    const auto ms = getMotionSettings();
 
     if (motionMode)
     {
@@ -465,7 +638,7 @@ void ParamRouletteProcessor::randomizeNow()
         //
         // 走 lockMotionBase() 而不是就地 captureSnapshot：基座相关的字段有四个
         // （快照 / program / 名字 / 计数），分两处赋值迟早会漏掉一个。
-        if (! motionBase.used)
+        if (! slot.base.used)
             lockMotionBase();
 
         // **顺序不能反**：轮廓走的是 setStateInformation，它会把整个状态
@@ -477,19 +650,18 @@ void ParamRouletteProcessor::randomizeNow()
         //   - fauna 只改 EG4（组 3）：实测 EG3 那条对音高没有可听差别，
         //     动它只是无谓地改掉用户的 preset。
         //   - program 变了就整个中止：用户中途换了 preset，基座已经对不上。
-        const int onlyGroup = motionProfile.looksLikeFauna ? 3 : -1;
+        const int onlyGroup = slot.profile.looksLikeFauna ? 3 : -1;
 
-        const auto cr = randomiseContours (*hosted, motionSettings.semantic,
-                                           motionSettings.motion, rng,
-                                           &motionBase.childState, onlyGroup,
-                                           motionBaseProgram);
+        const auto cr = randomiseContours (plugin, ms.semantic, ms.motion, rng,
+                                           &slot.base.childState, onlyGroup,
+                                           slot.baseProgram);
 
-        lastContoursWritten = cr.written;
+        slot.lastContoursWritten = cr.written;
 
         if (cr.failed)
         {
             // 写到一半失败：把基座整份写回去，别留下半套状态。
-            restoreSnapshot (motionBase, *hosted);
+            restoreSnapshot (slot.base, plugin);
             refreshModelValues();
             lastMotion = {};
             lastMotion.note = "曲线写入失败（preset 变了？）——已回到基座"_u8;
@@ -497,8 +669,8 @@ void ParamRouletteProcessor::randomizeNow()
             return;
         }
 
-        lastMotion = applyMotion (*hosted, model, checked, motionProfile,
-                                  motionBase.values, motionSettings, rng, cr.stages);
+        lastMotion = applyMotion (plugin, slot.model, slot.checked, slot.profile,
+                                  slot.base.values, ms, rng, cr.stages);
 
         if (cr.written > 0)
             lastMotion.note << "  ·  曲线 "_u8 << cr.written << " 条 / "_u8 << cr.stages << " 段"_u8;
@@ -509,17 +681,18 @@ void ParamRouletteProcessor::randomizeNow()
     else
     {
         RandomSettings s;
-        s.amount = pAmount->get();
-        s.lo     = pRangeLo->get();
-        s.hi     = pRangeHi->get();
+        s.amount    = pAmount->get();
+        s.lo        = pRangeLo->get();
+        s.hi        = pRangeHi->get();
+        s.maxParams = pMaxParams->get();   // 和运动模式音色层共用同一个控件
         s.normalise();
 
-        lastResult = randomize (*hosted, model, checked, s, rng);
+        lastResult = randomize (plugin, slot.model, slot.checked, s, rng);
         lastMotion = {};
     }
 
     refreshModelValues();
-    lastChangedCount = markChangedValues (model);
+    lastChangedCount = markChangedValues (slot.model);
 
     // "改了几个"用真正读回来的差异，不是随机化自己以为写了几个——
     // 插件可能把写入吸附或原地弹回，那种情况下 moved 是虚高的。
@@ -542,64 +715,91 @@ void ParamRouletteProcessor::setMotionMode (bool on)
 //==============================================================================
 int ParamRouletteProcessor::getHostedNumPrograms() const
 {
-    return hosted != nullptr ? hosted->getNumPrograms() : 0;
+    auto* p = cur().plugin.get();
+    return p != nullptr ? p->getNumPrograms() : 0;
 }
 
 int ParamRouletteProcessor::getHostedProgram() const
 {
-    return hosted != nullptr ? hosted->getCurrentProgram() : -1;
+    auto* p = cur().plugin.get();
+    return p != nullptr ? p->getCurrentProgram() : -1;
 }
 
 juce::String ParamRouletteProcessor::getHostedProgramName (int index) const
 {
-    if (hosted == nullptr || ! juce::isPositiveAndBelow (index, hosted->getNumPrograms()))
+    auto* p = cur().plugin.get();
+
+    if (p == nullptr || ! juce::isPositiveAndBelow (index, p->getNumPrograms()))
         return {};
 
-    return hosted->getProgramName (index);
+    return p->getProgramName (index);
 }
 
 void ParamRouletteProcessor::setHostedProgram (int index)
 {
     JUCE_ASSERT_MESSAGE_THREAD
 
-    if (hosted == nullptr || ! juce::isPositiveAndBelow (index, hosted->getNumPrograms()))
+    auto& slot = cur();
+    auto* p = slot.plugin.get();
+
+    if (p == nullptr || ! juce::isPositiveAndBelow (index, p->getNumPrograms()))
         return;
 
-    if (index == hosted->getCurrentProgram())
+    if (index == p->getCurrentProgram())
         return;
 
     // 不取 callbackLock：换 program 在 VST2 里是 effSetProgram，可能读采样、分配内存，
     // 拿着锁做这种事会拖出一大段音频空洞。宿主们（含 REAPER）都是这么调的。
-    hosted->setCurrentProgram (index);
+    p->setCurrentProgram (index);
 
     // 基座失效：它记的是另一个 program 的参数值和轮廓。
     // **不自动重锁**——锁定是用户的决定；下次「生成变体」会自动锁当前状态。
-    motionBase = Snapshot {};
-    motionBaseProgram = -1;
-    motionBaseName.clear();
-    motionBaseGeneration = 0;
+    slot.base = Snapshot {};
+    slot.baseProgram = -1;
+    slot.baseName.clear();
+    slot.baseGeneration = 0;
 
     refreshModelValues();
     ++structureGeneration;      // 178 个值全变了，整表重画
     sendChangeMessage();
 }
 
+MotionSettings ParamRouletteProcessor::getMotionSettings() const
+{
+    // 每次从参数现读。缓存一份成员的话，DAW 画在 Motion / Tone 上的自动化曲线
+    // 就只能改到那份缓存之外的东西——也就是根本不生效。
+    MotionSettings s;
+    s.semantic = motionSemantic;
+    s.motion   = pMotionAmt->get();
+    s.tone     = pToneAmt->get();
+    s.maxTone  = pMaxParams->get();
+    s.normalise();
+    return s;
+}
+
 void ParamRouletteProcessor::setMotionSettings (MotionSettings s)
 {
     s.normalise();
-    motionSettings = s;
+
+    motionSemantic = s.semantic;
+    *pMotionAmt    = s.motion;
+    *pToneAmt      = s.tone;
+    *pMaxParams    = s.maxTone;
+
     sendChangeMessage();
 }
 
 bool ParamRouletteProcessor::lockMotionBase()
 {
-    if (hosted == nullptr)
+    auto& slot = cur();
+
+    if (slot.plugin == nullptr)
         return false;
 
-    motionBase = captureSnapshot (*hosted, "基座"_u8);
-    motionBaseProgram = hosted->getCurrentProgram();
-    motionBaseName = getHostedProgramName (motionBaseProgram);
-    ++motionBaseGeneration;
+    slot.base = captureSnapshot (*slot.plugin, "基座"_u8);
+    slot.baseProgram = slot.plugin->getCurrentProgram();
+    slot.baseName = getHostedProgramName (slot.baseProgram);
+    ++slot.baseGeneration;
 
     sendChangeMessage();
     return true;
@@ -607,66 +807,148 @@ bool ParamRouletteProcessor::lockMotionBase()
 
 juce::String ParamRouletteProcessor::getMotionBaseLabel() const
 {
-    if (! motionBase.used)
+    const auto& slot = cur();
+
+    if (! slot.base.used)
         return "未设定"_u8;
 
     juce::String s;
 
-    if (motionBaseName.isNotEmpty())
-        s << motionBaseName;
-    else if (motionBaseProgram >= 0)
-        s << "program "_u8 << motionBaseProgram;
+    if (slot.baseName.isNotEmpty())
+        s << slot.baseName;
+    else if (slot.baseProgram >= 0)
+        s << "program "_u8 << slot.baseProgram;
     else
         s << "当前状态"_u8;
 
     // #N 是重锁计数。点一次「重设基座」这个数就该 +1；不变就说明没生效。
-    s << " #" << motionBaseGeneration;
+    s << " #" << slot.baseGeneration;
     return s;
 }
 
 bool ParamRouletteProcessor::restoreMotionBase()
 {
-    if (hosted == nullptr || ! motionBase.used)
+    auto& slot = cur();
+
+    if (slot.plugin == nullptr || ! slot.base.used)
         return false;
 
-    const bool ok = restoreSnapshot (motionBase, *hosted);
+    pushHistory();
+
+    const bool ok = restoreSnapshot (slot.base, *slot.plugin);
 
     refreshModelValues();
     sendChangeMessage();
     return ok;
 }
 
-void ParamRouletteProcessor::restoreMotionBaseFromTree (const juce::ValueTree& t)
+void ParamRouletteProcessor::restoreMotionBaseFromTree (int chainSlot, const juce::ValueTree& t)
 {
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
+        return;
+
+    auto& slot = chain[(size_t) chainSlot];
+
     // 只是把基座读回来，**不**写进插件。恢复工程时插件的状态已经从
     // HOSTED/state 还原过了，再写一遍基座会把用户存工程前的改动抹掉。
-    motionBase = t.hasType (ids::BASE) ? snapshotFromValueTree (t) : Snapshot {};
-    motionBaseProgram = (motionBase.used && hosted != nullptr) ? hosted->getCurrentProgram() : -1;
+    slot.base = t.hasType (ids::BASE) ? snapshotFromValueTree (t) : Snapshot {};
+    slot.baseProgram = (slot.base.used && slot.plugin != nullptr)
+                         ? slot.plugin->getCurrentProgram() : -1;
 
     // 标签故意写成一眼能认出来的样子。宿主在意料之外的时机重放状态时
     // （撤销、桥进程重启、复制 FX），基座会被这里换掉——界面上看到
     // "工程恢复 #0" 就说明发生了这件事，而不是"我锁的基座没生效"。
-    motionBaseName = motionBase.used ? "工程恢复"_u8 : juce::String();
-    motionBaseGeneration = 0;
+    slot.baseName = slot.base.used ? "工程恢复"_u8 : juce::String();
+    slot.baseGeneration = 0;
 }
 
 void ParamRouletteProcessor::captureSlot (int slot)
 {
-    if (hosted == nullptr)
+    auto* p = cur().plugin.get();
+
+    if (p == nullptr)
         return;
 
-    bank.capture (slot, *hosted);
+    bank.capture (slot, *p);
     sendChangeMessage();
 }
 
 void ParamRouletteProcessor::recallSlot (int slot)
 {
-    if (hosted == nullptr)
+    auto* p = cur().plugin.get();
+
+    if (p == nullptr)
         return;
 
-    bank.recall (slot, *hosted);
+    pushHistory();
+    bank.recall (slot, *p);
     refreshModelValues();
     sendChangeMessage();
+}
+
+//==============================================================================
+// 历史。游标算术全在 HistoryRing 里（那边可以被无头探针测），这边只管
+// "抓当前状态"和"还原一份"这两件需要真插件的事。每链位一份历史。
+void ParamRouletteProcessor::pushHistory()
+{
+    auto& slot = cur();
+
+    if (slot.plugin != nullptr)
+        slot.history.push (captureSnapshot (*slot.plugin, {}));
+}
+
+void ParamRouletteProcessor::applyHistoryEntry (const Snapshot& s)
+{
+    auto& slot = cur();
+
+    if (slot.plugin == nullptr)
+        return;
+
+    // 和随机化一样先记旧值，这样「仅改动」视图能显示这一步翻回去动了什么。
+    refreshModelValues();
+    snapshotPrevValues (slot.model);
+
+    restoreSnapshot (s, *slot.plugin);
+
+    refreshModelValues();
+    lastChangedCount = markChangedValues (slot.model);
+    lastResult.moved = lastChangedCount;
+
+    ++structureGeneration;      // 「仅改动」视图要重算可见行
+    sendChangeMessage();
+}
+
+bool ParamRouletteProcessor::historyBack()
+{
+    auto& slot = cur();
+
+    if (slot.plugin == nullptr)
+        return false;
+
+    // 回调只在游标位于尖端时才被调用，所以不会每次回退都白抓一份状态块。
+    if (auto* s = slot.history.back ([&slot] { return captureSnapshot (*slot.plugin, {}); }))
+    {
+        applyHistoryEntry (*s);
+        return true;
+    }
+
+    return false;
+}
+
+bool ParamRouletteProcessor::historyForward()
+{
+    auto& slot = cur();
+
+    if (slot.plugin == nullptr)
+        return false;
+
+    if (auto* s = slot.history.forward())
+    {
+        applyHistoryEntry (*s);
+        return true;
+    }
+
+    return false;
 }
 
 void ParamRouletteProcessor::clearSlot (int slot)
@@ -677,12 +959,14 @@ void ParamRouletteProcessor::clearSlot (int slot)
 
 void ParamRouletteProcessor::applyMorphNow()
 {
+    auto& slot = cur();
+
     // 只存了一个 slot 时权重会全塌到它身上，等于每 33ms 强行召回一次，
     // 用户自己转旋钮都会被拽回去。两个起步才有"插值"可言。
-    if (hosted == nullptr || bank.numUsed() < 2)
+    if (slot.plugin == nullptr || bank.numUsed() < 2)
         return;
 
-    bank.applyMorph (*hosted, model, checked, getMorphMode(),
+    bank.applyMorph (*slot.plugin, slot.model, slot.checked, getMorphMode(),
                      pMorphX->get(), pMorphY->get());
 
     hostedValuesDirty.store (true, std::memory_order_relaxed);
@@ -690,7 +974,9 @@ void ParamRouletteProcessor::applyMorphNow()
 
 void ParamRouletteProcessor::startInertProbe (std::function<void (int, int)> onDone)
 {
-    if (hosted == nullptr)
+    auto& slot = cur();
+
+    if (slot.plugin == nullptr)
     {
         if (onDone != nullptr)
             onDone (0, 0);
@@ -699,7 +985,7 @@ void ParamRouletteProcessor::startInertProbe (std::function<void (int, int)> onD
 
     juce::WeakReference<ParamRouletteProcessor> safe (this);
 
-    probe.start (*hosted, model, [safe, onDone] (int numInert, int numEndpointOnly)
+    probe.start (*slot.plugin, slot.model, [safe, onDone] (int numInert, int numEndpointOnly)
     {
         if (auto* self = safe.get())
         {
@@ -716,8 +1002,8 @@ void ParamRouletteProcessor::startInertProbe (std::function<void (int, int)> onD
 //==============================================================================
 void ParamRouletteProcessor::handleAsyncUpdate()
 {
-    if (latencyDirty.exchange (false) && hosted != nullptr)
-        setLatencySamples (hosted->getLatencySamples());
+    if (latencyDirty.exchange (false))
+        updateChainLatency();
 
     if (randomPending.exchange (false))
         randomizeNow();
@@ -727,6 +1013,11 @@ void ParamRouletteProcessor::timerCallback()
 {
     if (morphDirty.exchange (false))
         applyMorphNow();
+
+    // 链尾 limiter 的设置也在这里跟：它们是可自动化参数，用户或 DAW 随时会动。
+    // 30 Hz 足够——这两个不是要做采样级自动化的东西。
+    outputGuard.setCeilingDb (pCeiling->get());
+    outputGuard.setEnabled (pGuardOn->get());
 }
 
 void ParamRouletteProcessor::parameterValueChanged (int parameterIndex, float newValue)
@@ -779,7 +1070,7 @@ void ParamRouletteProcessor::getStateInformation (juce::MemoryBlock& destData)
     const juce::ScopedLock sl (getCallbackLock());
 
     juce::ValueTree v (ids::ROOT);
-    v.setProperty (ids::version,   2,                      nullptr);
+    v.setProperty (ids::version,   3,                      nullptr);
     v.setProperty (ids::amount,    pAmount->get(),         nullptr);
     v.setProperty (ids::lo,        pRangeLo->get(),        nullptr);
     v.setProperty (ids::hi,        pRangeHi->get(),        nullptr);
@@ -788,36 +1079,57 @@ void ParamRouletteProcessor::getStateInformation (juce::MemoryBlock& destData)
     v.setProperty (ids::morphY,    pMorphY->get(),         nullptr);
     v.setProperty (ids::filter,    filterText,             nullptr);
     v.setProperty (ids::onlyMatch, onlyMatching,           nullptr);
+    v.setProperty (ids::focused,   focused,                nullptr);
+    v.setProperty (ids::ceiling,   pCeiling->get(),        nullptr);
+    v.setProperty (ids::guardOn,   pGuardOn->get(),        nullptr);
 
-    v.setProperty (ids::motionOn,  motionMode,                       nullptr);
-    v.setProperty (ids::semantic,  (int) motionSettings.semantic,     nullptr);
-    v.setProperty (ids::motionAmt, motionSettings.motion,             nullptr);
-    v.setProperty (ids::toneAmt,   motionSettings.tone,               nullptr);
+    // 属性名保持不变，所以 v2 的工程照样读得进来——只是这三个值现在住在
+    // 可自动化参数里而不是普通成员里。
+    v.setProperty (ids::motionOn,  motionMode,              nullptr);
+    v.setProperty (ids::semantic,  (int) motionSemantic,    nullptr);
+    v.setProperty (ids::motionAmt, pMotionAmt->get(),       nullptr);
+    v.setProperty (ids::toneAmt,   pToneAmt->get(),         nullptr);
+    v.setProperty (ids::maxParams, pMaxParams->get(),       nullptr);
 
-    juce::StringArray ex;
-    for (int i = 0; i < model.size(); ++i)
-        if (i < checked.size() && ! checked[i])
-            ex.add (juce::String (model.getReference (i).index));
+    // 勾选表和基座从 v3 起跟着各自的 HOSTED 子节点走，不再放在根上——
+    // 一条链上每位的"我不想随机这些"是各自独立的。
 
-    // 这个属性总是写，哪怕是空串——"记过、而且一个都不排除"和"没记过"必须能区分。
-    v.setProperty (ids::excluded, ex.joinIntoString (","), nullptr);
-
-    if (hosted != nullptr)
+    // —— 每链位一个 HOSTED 子节点，带 slot 属性。
+    //
+    // v2 只有一个 HOSTED、没有 slot 属性。读的那边靠"有没有 slot 属性"分辨，
+    // 所以这里**必须**写 slot——哪怕只装了一个插件。
+    for (int i = 0; i < kMaxChain; ++i)
     {
-        juce::ValueTree h (ids::HOSTED);
+        auto& s = chain[(size_t) i];
 
-        if (auto xml = hostedDesc.createXml())
+        if (s.plugin == nullptr)
+            continue;
+
+        juce::ValueTree h (ids::HOSTED);
+        h.setProperty (ids::slot, i, nullptr);
+        h.setProperty (ids::bypass, s.bypassed, nullptr);
+
+        if (auto xml = s.desc.createXml())
             h.setProperty (ids::desc, xml->toString(), nullptr);
 
         juce::MemoryBlock child;
-        hosted->getStateInformation (child);
+        s.plugin->getStateInformation (child);
         h.setProperty (ids::state, juce::var (child), nullptr);
+
+        // 勾选表和基座是**每链位**的，所以跟着各自的 HOSTED 节点走，
+        // 不能像 v2 那样放在根上。
+        juce::StringArray slotEx;
+        for (int k = 0; k < s.model.size(); ++k)
+            if (k < s.checked.size() && ! s.checked[k])
+                slotEx.add (juce::String (s.model.getReference (k).index));
+
+        h.setProperty (ids::excluded, slotEx.joinIntoString (","), nullptr);
+        h.addChild (snapshotToValueTree (s.base, ids::BASE), -1, nullptr);
 
         v.addChild (h, -1, nullptr);
     }
 
     v.addChild (bank.toValueTree(), -1, nullptr);
-    v.addChild (snapshotToValueTree (motionBase, ids::BASE), -1, nullptr);
 
     // 必须走二进制流。createXml() 会把 var(MemoryBlock) 转成 base64 *字符串*，
     // 读回来就成了 String 而不是 binary，子插件状态直接丢。
@@ -876,72 +1188,154 @@ void ParamRouletteProcessor::applyPendingState()
     onlyMatching = (bool) v.getProperty (ids::onlyMatch, false);
 
     motionMode = (bool) v.getProperty (ids::motionOn, false);
-    motionSettings.semantic = (MotionSemantic) juce::jlimit (0, kNumMotionSemantics - 1,
-                                                            (int) v.getProperty (ids::semantic,
-                                                                                 (int) MotionSemantic::Rise));
-    motionSettings.motion = (float) v.getProperty (ids::motionAmt, 0.65f);
-    motionSettings.tone   = (float) v.getProperty (ids::toneAmt,   0.35f);
-    motionSettings.normalise();
+    motionSemantic = (MotionSemantic) juce::jlimit (0, kNumMotionSemantics - 1,
+                                                    (int) v.getProperty (ids::semantic,
+                                                                         (int) MotionSemantic::Rise));
 
-    const auto hostedTree = v.getChildWithName (ids::HOSTED);
+    // v2 的工程只有 motionAmt / toneAmt，没有 maxParams——缺省 0（不限制），
+    // 也就是和以前的行为完全一致。
+    *pMotionAmt = (float) v.getProperty (ids::motionAmt, 0.65f);
+    *pToneAmt   = (float) v.getProperty (ids::toneAmt,   0.35f);
+    *pMaxParams = (int)   v.getProperty (ids::maxParams, 0);
 
-    if (! hostedTree.isValid())
+    // 链尾安全网：v2 的工程里没有这两个属性，缺省成"开着、−1 dB"。
+    // 老工程升上来自动获得保护，这是对的默认。
+    *pCeiling = (float) v.getProperty (ids::ceiling, -1.0f);
+    *pGuardOn = (bool)  v.getProperty (ids::guardOn, true);
+
+    const int  version = (int) v.getProperty (ids::version, 2);
+    const bool legacy  = version < 3;
+
+    //== 收集要恢复的链位 ======================================================
+    // 一位一位来，不能一起发：loading 是**一个**标志，并发加载会被挡掉，
+    // 结果只有第一个成功、剩下的静默丢失。
+    struct PendingLoad
     {
-        unloadPlugin();
-        return;
+        int  slot = 0;
+        bool bypassed = false;
+        juce::PluginDescription desc;
+        juce::MemoryBlock       childState;
+        bool                    hasEx = false;
+        juce::String            exCsv;
+        juce::ValueTree         baseTree;
+    };
+
+    auto jobs = std::make_shared<std::vector<PendingLoad>>();
+
+    for (int i = 0; i < v.getNumChildren(); ++i)
+    {
+        const auto h = v.getChild (i);
+
+        if (! h.hasType (ids::HOSTED))
+            continue;
+
+        PendingLoad job;
+
+        // v2 的 HOSTED 没有 slot 属性 —— 那就是老工程，装进链位 0。
+        job.slot = juce::jlimit (0, kMaxChain - 1, (int) h.getProperty (ids::slot, 0));
+        job.bypassed = (bool) h.getProperty (ids::bypass, false);
+
+        if (auto xml = juce::parseXML (h.getProperty (ids::desc).toString()))
+            job.desc.loadFromXml (*xml);
+
+        if (job.desc.fileOrIdentifier.isEmpty() && job.desc.name.isEmpty())
+            continue;
+
+        if (auto* mb = h.getProperty (ids::state).getBinaryData())
+            job.childState = *mb;
+
+        // v2 把勾选表和基座放在**根**上（那时只有一个插件）；v3 放在各自的 HOSTED 里。
+        if (legacy)
+        {
+            job.hasEx    = v.hasProperty (ids::excluded);
+            job.exCsv    = v.getProperty (ids::excluded).toString();
+            job.baseTree = v.getChildWithName (ids::BASE);
+        }
+        else
+        {
+            job.hasEx    = h.hasProperty (ids::excluded);
+            job.exCsv    = h.getProperty (ids::excluded).toString();
+            job.baseTree = h.getChildWithName (ids::BASE);
+        }
+
+        jobs->push_back (std::move (job));
     }
 
-    juce::PluginDescription desc;
-    if (auto xml = juce::parseXML (hostedTree.getProperty (ids::desc).toString()))
-        desc.loadFromXml (*xml);
+    // 先把所有链位清空。恢复的工程可能比现在装的少，残留的插件会继续出声。
+    for (int i = 0; i < kMaxChain; ++i)
+        if (chain[(size_t) i].plugin != nullptr)
+            unloadSlot (i);
 
-    if (desc.fileOrIdentifier.isEmpty() && desc.name.isEmpty())
+    if (jobs->empty())
         return;
 
-    juce::MemoryBlock childState;
-    if (auto* mb = hostedTree.getProperty (ids::state).getBinaryData())
-        childState = *mb;
-
-    const auto snapTree = v.getChildWithName (ids::SNAPSHOTS);
-    const auto baseTree = v.getChildWithName (ids::BASE);
-    const bool hasEx    = v.hasProperty (ids::excluded);
-    const auto exCsv    = v.getProperty (ids::excluded).toString();
+    const int wantFocus = juce::jlimit (0, kMaxChain - 1, (int) v.getProperty (ids::focused, 0));
+    auto snapTree = std::make_shared<juce::ValueTree> (v.getChildWithName (ids::SNAPSHOTS));
 
     juce::WeakReference<ParamRouletteProcessor> safe (this);
 
-    loadPlugin (desc, [safe, childState, snapTree, baseTree, hasEx, exCsv] (const juce::String& error)
+    // 自引用的 shared_ptr<function>：链式异步加载，每一位完成后接着下一位。
+    // 递归 lambda 在 C++17 里只能这么写。
+    auto step = std::make_shared<std::function<void (size_t)>>();
+
+    *step = [safe, jobs, snapTree, step, wantFocus] (size_t index)
     {
         auto* self = safe.get();
-
-        if (self == nullptr || error.isNotEmpty())
+        if (self == nullptr)
             return;
 
-        auto* h = self->getHosted();
-        if (h == nullptr)
-            return;
-
-        if (childState.getSize() > 0)
-            h->setStateInformation (childState.getData(), (int) childState.getSize());
-
-        // 顺序有讲究：installHosted 已经把 bank 清空、基座清掉、勾选重置成默认了，
-        // 所以这几步必须在它之后。
-        if (hasEx)
+        if (index >= jobs->size())
         {
-            const auto ex = parseIndexList (exCsv);
-            auto& m = self->getModel();
-            auto& c = self->getChecked();
+            // 全部装完才恢复快照和聚焦：快照是整条链的，中途恢复会对不上。
+            self->getBank().restoreFromValueTree (*snapTree);
+            self->setFocusedSlot (wantFocus);
 
-            for (int i = 0; i < m.size(); ++i)
-                c.set (i, ! ex.contains (m.getReference (i).index));
+            self->refreshModelValues();
+            ++self->structureGeneration;
+            self->sendChangeMessage();
+            return;
         }
 
-        self->getBank().restoreFromValueTree (snapTree);
-        self->restoreMotionBaseFromTree (baseTree);
+        const auto job = (*jobs)[index];
 
-        self->refreshModelValues();
-        ++self->structureGeneration;
-        self->sendChangeMessage();
-    });
+        self->loadPluginIntoSlot (job.slot, job.desc,
+                                 [safe, job, step, index] (const juce::String& error)
+        {
+            auto* s = safe.get();
+            if (s == nullptr)
+                return;
+
+            // 某一位加载失败（插件卸载了 / 换机器了）**不能中断整条链**——
+            // 剩下的还得装上，否则一个坏插件会让整个工程变空。
+            if (error.isEmpty())
+            {
+                if (auto* h = s->getSlotPlugin (job.slot))
+                {
+                    if (job.childState.getSize() > 0)
+                        h->setStateInformation (job.childState.getData(),
+                                                (int) job.childState.getSize());
+
+                    // 顺序有讲究：installHosted 已经把这一位的基座清掉、
+                    // 勾选重置成默认了，所以这两步必须在它之后。
+                    if (job.hasEx)
+                    {
+                        const auto ex = parseIndexList (job.exCsv);
+                        auto& slot = s->chain[(size_t) job.slot];
+
+                        for (int k = 0; k < slot.model.size(); ++k)
+                            slot.checked.set (k, ! ex.contains (slot.model.getReference (k).index));
+                    }
+
+                    s->restoreMotionBaseFromTree (job.slot, job.baseTree);
+                    s->setSlotBypassed (job.slot, job.bypassed);
+                }
+            }
+
+            (*step) (index + 1);
+        });
+    };
+
+    (*step) (0);
 }
 
 } // namespace pr

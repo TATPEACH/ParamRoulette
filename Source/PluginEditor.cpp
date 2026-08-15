@@ -126,6 +126,87 @@ ParamRouletteEditor::ParamRouletteEditor (ParamRouletteProcessor& p)
     };
     addAndMakeVisible (cbMorphMode);
 
+    //== 链位一行 ================================================================
+    for (int i = 0; i < kMaxChain; ++i)
+    {
+        auto& ui = chainUI[(size_t) i];
+
+        ui.focus.setButtonText (juce::String (i + 1));
+        ui.focus.setTooltip ("链位 "_u8 + juce::String (i + 1)
+                             + "。点一下把所有操作切到这一位；"_u8
+                             + "「选择插件…」会装到当前聚焦的这一位上。"_u8);
+        ui.focus.onClick = [this, i] { proc.setFocusedSlot (i); };
+
+        // 连成一排：JUCE 会把相邻的同 radioGroup 按钮画成连体的
+        ui.focus.setConnectedEdges (
+            (i == 0 ? 0 : juce::Button::ConnectedOnLeft)
+            | (i == kMaxChain - 1 ? 0 : juce::Button::ConnectedOnRight));
+
+        addAndMakeVisible (ui.focus);
+
+        ui.bypass.setButtonText ({});
+        ui.bypass.setTooltip ("旁通链位 "_u8 + juce::String (i + 1)
+                              + "。旁通是**位置**的属性，换插件不会重置它。"_u8);
+        ui.bypass.onClick = [this, i] { proc.setSlotBypassed (i, chainUI[(size_t) i].bypass.getToggleState()); };
+        addAndMakeVisible (ui.bypass);
+    }
+
+    styleCaption (lGuard);
+    lGuard.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (lGuard);
+
+    //== 「只动 N 个」 ============================================================
+    styleCaption (lMaxParams);
+    addAndMakeVisible (lMaxParams);
+
+    sMaxParams.setSliderStyle (juce::Slider::IncDecButtons);
+    sMaxParams.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 44, 18);
+    sMaxParams.setRange (0.0, (double) proc.pMaxParams->getRange().getEnd(), 1.0);
+    sMaxParams.setValue (proc.pMaxParams->get(), juce::dontSendNotification);
+
+    // 0 不该显示成 "0"——那看着像"一个都不动"。它的意思是"不限制"。
+    sMaxParams.textFromValueFunction = [] (double v)
+    {
+        return v < 0.5 ? juce::String ("不限"_u8) : juce::String ((int) v);
+    };
+    sMaxParams.valueFromTextFunction = [] (const juce::String& t)
+    {
+        return t.containsIgnoreCase ("不限"_u8) ? 0.0 : (double) t.getIntValue();
+    };
+
+    sMaxParams.onValueChange = [this]
+    {
+        if (syncing)
+            return;
+
+        auto& p = *proc.pMaxParams;
+        p.beginChangeGesture();
+        p.setValueNotifyingHost (p.convertTo0to1 ((float) sMaxParams.getValue()));
+        p.endChangeGesture();
+    };
+    addAndMakeVisible (sMaxParams);
+
+    //== 随机化历史 ==============================================================
+    // 插件内部没有 undo。没有这两个按钮的话，"上一个其实更好"就只能靠运气再掷回来。
+    bHistBack.onClick = [this]
+    {
+        note = proc.historyBack() ? "← 回到上一个状态"_u8 : "已经是最早的记录了"_u8;
+    };
+    bHistFwd.onClick = [this]
+    {
+        note = proc.historyForward() ? "→ 前进到下一个状态"_u8 : "已经是最新的了"_u8;
+    };
+
+    for (auto* b : { &bHistBack, &bHistFwd })
+    {
+        b->setTooltip ("随机化历史。最多记 20 步，只在内存里，不进工程。"_u8);
+        addAndMakeVisible (*b);
+    }
+
+    styleCaption (lHistory);
+    lHistory.setJustificationType (juce::Justification::centred);
+    addAndMakeVisible (lHistory);
+
     //== 运动模式 ================================================================
     tbMotion.onClick = [this]
     {
@@ -140,22 +221,19 @@ ParamRouletteEditor::ParamRouletteEditor (ParamRouletteProcessor& p)
     cbSemantic.onChange = [this] { pushMotionSettings(); };
     addAndMakeVisible (cbSemantic);
 
-    // 运动/音色两个强度是**普通设置，不是可自动化参数**：VST3 的参数表不能中途
-    // 增删，构造时那 7 个已经定死了。它们会进工程状态，但 DAW 里画不了曲线。
+    // 运动 / 音色两个强度**是可自动化参数**（pMotionAmt / pToneAmt），所以走
+    // wireSlider 那条路，和强度/上下限完全一样。
+    //
+    // 以前它们是普通成员、画不了自动化，理由写的是"VST3 的参数表不能中途增删"——
+    // 那说的是**运行时**。编译期在构造函数里追加是安全的，宿主按参数 ID 匹配自动化。
     for (auto* l : { &lMotionAmt, &lToneAmt })
     {
         styleCaption (*l);
         addAndMakeVisible (*l);
     }
 
-    for (auto* s : { &sMotionAmt, &sToneAmt })
-    {
-        s->setSliderStyle (juce::Slider::LinearHorizontal);
-        s->setTextBoxStyle (juce::Slider::TextBoxLeft, false, 40, 18);
-        s->setRange (0.0, 1.0, 0.01);
-        s->onValueChange = [this] { pushMotionSettings(); };
-        addAndMakeVisible (*s);
-    }
+    wireSlider (sMotionAmt, *proc.pMotionAmt);
+    wireSlider (sToneAmt,   *proc.pToneAmt);
 
     bLockBase.onClick = [this]
     {
@@ -281,12 +359,14 @@ ParamRouletteEditor::ParamRouletteEditor (ParamRouletteProcessor& p)
 
     //== 挂钩 ====================================================================
     // 换插件前 processor 会**同步**调这个把子插件窗口关掉。装在这里、dtor 里第一件事就摘掉。
-    proc.closeHostedWindow = [this] { hostedWindow.reset(); };
+    proc.closeHostedWindow = [this] (int chainSlot) { closeHostedWindows (chainSlot); };
     proc.addChangeListener (this);
 
     setResizable (true, true);
-    setResizeLimits (640, 560, 1400, 1200);
-    setSize (720, 680);
+    // 最小宽度提到 680：随机化那一行现在还要塞「只动 N 个」和历史前后翻，
+    // 640 下 lResult 会被挤到只剩一百多像素，运动模式那句诊断根本看不全。
+    setResizeLimits (680, 560, 1600, 1200);
+    setSize (800, 690);
 
     rebuildAll();
     startTimerHz (20);
@@ -299,7 +379,7 @@ ParamRouletteEditor::~ParamRouletteEditor()
     proc.removeChangeListener (this);
     stopTimer();
 
-    hostedWindow.reset();
+    closeHostedWindows (-1);
     scanWindow.reset();
 
     setLookAndFeel (nullptr);
@@ -349,6 +429,24 @@ void ParamRouletteEditor::resized()
 
     r.removeFromTop (6);
 
+    {   // 链位一行：6 个聚焦按钮 + 各自的旁通勾选，右边是 limiter 读数
+        auto row = r.removeFromTop (24);
+
+        lGuard.setBounds (row.removeFromRight (180));
+        row.removeFromRight (8);
+
+        const int cellW = row.getWidth() / kMaxChain;
+
+        for (int i = 0; i < kMaxChain; ++i)
+        {
+            auto cell = (i == kMaxChain - 1) ? row : row.removeFromLeft (cellW);
+            chainUI[(size_t) i].bypass.setBounds (cell.removeFromRight (22));
+            chainUI[(size_t) i].focus .setBounds (cell);
+        }
+    }
+
+    r.removeFromTop (6);
+
     {   // 强度 / 下限 / 上限
         auto row = r.removeFromTop (24);
         const int w = row.getWidth() / 3;
@@ -370,13 +468,25 @@ void ParamRouletteEditor::resized()
 
     r.removeFromTop (6);
 
-    {   // 随机化 / 体检 / 结果 / 模式
+    {   // 随机化 / 体检 / 结果 / 只动 N / 历史 / morph 模式
         auto row = r.removeFromTop (26);
         bRandom.setBounds (row.removeFromLeft (84));
         row.removeFromLeft (4);
         bProbe.setBounds (row.removeFromLeft (56));
+
+        // 从右往左切，lResult 吃掉中间剩下的
         cbMorphMode.setBounds (row.removeFromRight (88));
+        row.removeFromRight (10);
+
+        bHistFwd .setBounds (row.removeFromRight (26));
+        lHistory .setBounds (row.removeFromRight (44));
+        bHistBack.setBounds (row.removeFromRight (26));
+        row.removeFromRight (10);
+
+        sMaxParams.setBounds (row.removeFromRight (78));
+        lMaxParams.setBounds (row.removeFromRight (30));
         row.removeFromRight (8);
+
         lResult.setBounds (row);
     }
 
@@ -495,12 +605,12 @@ void ParamRouletteEditor::pushMotionSettings()
     if (syncing)
         return;
 
-    MotionSettings s;
+    // 强度那两个滑条**不经过这里**——它们由 wireSlider 直接写各自的可自动化参数。
+    // 这里只管语义：它不可自动化，只能走 processor 的成员。
+    // 所以先把当前设置读出来，只覆盖 semantic 再写回，免得把参数值来回搬一趟。
+    auto s = proc.getMotionSettings();
     s.semantic = (MotionSemantic) juce::jlimit (0, kNumMotionSemantics - 1,
                                                 cbSemantic.getSelectedItemIndex());
-    s.motion = (float) sMotionAmt.getValue();
-    s.tone   = (float) sToneAmt.getValue();
-
     proc.setMotionSettings (s);
 }
 
@@ -515,8 +625,76 @@ void ParamRouletteEditor::syncMotionUI()
     if (cbSemantic.getSelectedItemIndex() != idx)
         cbSemantic.setSelectedItemIndex (idx, juce::dontSendNotification);
 
-    if (! sMotionAmt.isMouseButtonDown()) sMotionAmt.setValue (s.motion, juce::dontSendNotification);
-    if (! sToneAmt  .isMouseButtonDown()) sToneAmt  .setValue (s.tone,   juce::dontSendNotification);
+    // 两个强度滑条现在跟着参数走，统一在 syncFromParameters 里回写。
+}
+
+void ParamRouletteEditor::refreshChainUI()
+{
+    const juce::ScopedValueSetter<bool> guard (syncing, true);
+
+    const int focus = proc.getFocusedSlot();
+
+    for (int i = 0; i < kMaxChain; ++i)
+    {
+        auto& ui = chainUI[(size_t) i];
+        const bool loaded = proc.isSlotLoaded (i);
+
+        // 按钮上写 "序号 插件名"。名字截短——六个格子分不到多少像素，
+        // 而且完整名字在顶栏那一行已经有了。
+        juce::String t (i + 1);
+        if (loaded)
+        {
+            auto n = proc.getSlotName (i);
+            t << " " << (n.length() > 9 ? n.substring (0, 8) + "…"_u8 : n);
+        }
+        ui.focus.setButtonText (t);
+
+        // 三种状态要一眼分得开：聚焦的、装了插件的、空的。
+        ui.focus.setColour (juce::TextButton::buttonColourId,
+                            i == focus       ? juce::Colour (0xff3d6b7d)
+                            : loaded         ? juce::Colour (0xff3a3a3a)
+                                             : juce::Colour (0xff2a2a2a));
+        ui.focus.setColour (juce::TextButton::textColourOffId,
+                            loaded ? juce::Colour (0xffe0e0e0) : juce::Colour (0xff707070));
+
+        ui.bypass.setToggleState (proc.isSlotBypassed (i), juce::dontSendNotification);
+        ui.bypass.setEnabled (loaded);
+    }
+
+    // —— 链尾安全网的读数。
+    // NaN 优先显示：那是"某个子插件坏了"，比增益衰减要紧得多。
+    if (proc.consumeSawNonFinite())
+        guardWarnUntil = juce::Time::getMillisecondCounter() + 4000;
+
+    const bool warn = juce::Time::getMillisecondCounter() < guardWarnUntil;
+
+    if (warn)
+    {
+        lGuard.setText ("⚠ 子插件输出了 NaN，已清零"_u8, juce::dontSendNotification);
+        lGuard.setColour (juce::Label::textColourId, juce::Colour (0xffd9544f));
+    }
+    else if (const float gr = proc.getGuardGrDb(); gr > 0.1f)
+    {
+        lGuard.setText ("限幅 −"_u8 + juce::String (gr, 1) + " dB"_u8, juce::dontSendNotification);
+        lGuard.setColour (juce::Label::textColourId, juce::Colour (0xffd9a441));
+    }
+    else
+    {
+        lGuard.setText ({}, juce::dontSendNotification);
+    }
+}
+
+void ParamRouletteEditor::refreshHistoryUI()
+{
+    const bool has = proc.getHosted() != nullptr;
+
+    bHistBack.setEnabled (has && proc.canHistoryBack());
+    bHistFwd .setEnabled (has && proc.canHistoryForward());
+
+    const int n = proc.getHistoryCount();
+    lHistory.setText (n > 1 ? (juce::String (proc.getHistoryPos() + 1) + "/" + juce::String (n))
+                            : juce::String ("—"_u8),
+                      juce::dontSendNotification);
 }
 
 void ParamRouletteEditor::rebuildAll()
@@ -598,6 +776,11 @@ void ParamRouletteEditor::syncFromParameters()
     if (! sAmount.isMouseButtonDown()) sAmount.setValue (proc.pAmount->get(),  juce::dontSendNotification);
     if (! sLo    .isMouseButtonDown()) sLo    .setValue (proc.pRangeLo->get(), juce::dontSendNotification);
     if (! sHi    .isMouseButtonDown()) sHi    .setValue (proc.pRangeHi->get(), juce::dontSendNotification);
+
+    // 运动 / 音色 / 只动 N 个也是可自动化参数，同一条回写路径
+    if (! sMotionAmt.isMouseButtonDown()) sMotionAmt.setValue (proc.pMotionAmt->get(), juce::dontSendNotification);
+    if (! sToneAmt  .isMouseButtonDown()) sToneAmt  .setValue (proc.pToneAmt->get(),   juce::dontSendNotification);
+    if (! sMaxParams.isMouseButtonDown()) sMaxParams.setValue (proc.pMaxParams->get(), juce::dontSendNotification);
 
     pad.setPosition (proc.pMorphX->get(), proc.pMorphY->get());   // 拖动中它自己会拒绝
 
@@ -704,7 +887,14 @@ void ParamRouletteEditor::updateStatus()
     bUnload.setEnabled (has);
     bRandom.setEnabled (has);
     bProbe .setEnabled (has && ! proc.getProbe().isRunning());
-    bUI.setButtonText (hostedWindow != nullptr ? "关界面"_u8 : "界面"_u8);
+    const bool winOpen = juce::isPositiveAndBelow (proc.getFocusedSlot(), kMaxChain)
+                      && hostedWindows[(size_t) proc.getFocusedSlot()] != nullptr;
+    bUI.setButtonText (winOpen ? "关界面"_u8 : "界面"_u8);
+
+    // 「只动 N 个」对普通随机化和运动模式的音色层都有效，所以只要有插件就能调
+    sMaxParams.setEnabled (has);
+    refreshHistoryUI();
+    refreshChainUI();
 
     // 一个按钮两种行为，文字得跟着换，不然没法知道现在按下去会发生什么
     bRandom.setButtonText (motion ? "生成变体"_u8 : "随机化"_u8);
@@ -792,7 +982,8 @@ void ParamRouletteEditor::closeScanWindow()
 
 void ParamRouletteEditor::loadDescription (const juce::PluginDescription& desc)
 {
-    hostedWindow.reset();       // 旧界面必须先死，实例才能换
+    // 旧界面必须先死，实例才能换。只关这一位——别的链位的窗口该留着。
+    closeHostedWindows (proc.getFocusedSlot());
     note = "正在加载 "_u8 + desc.name + " …"_u8;
     updateStatus();
 
@@ -815,36 +1006,59 @@ void ParamRouletteEditor::loadDescription (const juce::PluginDescription& desc)
     });
 }
 
+void ParamRouletteEditor::closeHostedWindows (int chainSlot)
+{
+    if (chainSlot < 0)
+    {
+        for (auto& w : hostedWindows)
+            w.reset();
+
+        return;
+    }
+
+    if (juce::isPositiveAndBelow (chainSlot, kMaxChain))
+        hostedWindows[(size_t) chainSlot].reset();
+}
+
 void ParamRouletteEditor::toggleHostedWindow()
 {
-    if (hostedWindow != nullptr)
+    // 开关的是**当前聚焦的**链位的界面。想同时看两位就切过去再点一次，
+    // 两个窗口会一起留着。
+    const int slot = proc.getFocusedSlot();
+
+    if (! juce::isPositiveAndBelow (slot, kMaxChain))
+        return;
+
+    auto& win = hostedWindows[(size_t) slot];
+
+    if (win != nullptr)
     {
-        hostedWindow.reset();
+        win.reset();
         updateStatus();
         return;
     }
 
-    auto* p = proc.getHosted();
+    auto* p = proc.getSlotPlugin (slot);
     if (p == nullptr)
         return;
 
     juce::Component::SafePointer<ParamRouletteEditor> safe (this);
 
-    hostedWindow = std::make_unique<HostedPluginWindow> (*p,
-                                                         [safe]
-                                                         {
-                                                             if (auto* self = safe.getComponent())
-                                                             {
-                                                                 self->hostedWindow.reset();
-                                                                 self->updateStatus();
-                                                             }
-                                                         });
+    win = std::make_unique<HostedPluginWindow> (*p,
+                                                [safe, slot]
+                                                {
+                                                    if (auto* self = safe.getComponent())
+                                                    {
+                                                        self->closeHostedWindows (slot);
+                                                        self->updateStatus();
+                                                    }
+                                                });
     updateStatus();
 }
 
 void ParamRouletteEditor::doUnload()
 {
-    hostedWindow.reset();
+    closeHostedWindows (proc.getFocusedSlot());
     proc.unloadPlugin();
     note.clear();
 }

@@ -21,6 +21,16 @@ struct Snapshot
     juce::String       name;
     std::vector<float> values;      ///< 全部参数的归一化值，按参数下标对齐
     juce::MemoryBlock  childState;  ///< 子插件 getStateInformation，用于精确召回
+
+    /** 这份快照是从**哪个插件**抓的（PluginDescription::createIdentifierString）。
+
+        为什么必须记：`childState` 是一团只有那个插件认得的字节。喂给别的插件
+        轻则被忽略，重则崩溃或者污染它的内部状态。单插件时代不可能搞混，
+        但现在有六个链位，"在链位 0 存的快照、切到链位 1 召回"是一步之遥的误操作。
+
+        空 = 老工程存的快照（那时没记这个字段），此时不做校验——
+        对老工程来说链上只有一位，混不起来。 */
+    juce::String pluginId;
 };
 
 enum class MorphMode { OneD = 0, TwoD = 1 };
@@ -30,8 +40,14 @@ enum class MorphMode { OneD = 0, TwoD = 1 };
 Snapshot captureSnapshot (juce::AudioPluginInstance&, const juce::String& name = {});
 
 /** 精确还原一份快照。有状态块就用状态块（连宿主看不见的内部状态也回来），
-    没有就退回逐参数写。 */
+    没有就退回逐参数写。
+
+    **插件对不上就什么都不做并返回 false**：状态块是插件私有格式，喂错了
+    轻则被忽略、重则崩溃。见 `Snapshot::pluginId`。 */
 bool restoreSnapshot (const Snapshot&, juce::AudioPluginInstance&);
+
+/** 这份快照能不能安全地还原进这个插件？ */
+bool snapshotMatchesPlugin (const Snapshot&, const juce::AudioPluginInstance&);
 
 /** 快照 ⇄ ValueTree。slot 和运动模式的基座共用同一份格式，
     所以这两个是自由函数而不是 SnapshotBank 的成员。 */

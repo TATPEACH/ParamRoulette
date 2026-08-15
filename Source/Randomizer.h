@@ -12,9 +12,26 @@ struct RandomSettings
     float lo     = 0.0f;    ///< 取值下限（归一化）
     float hi     = 1.0f;    ///< 取值上限（归一化）
 
+    /** 每次最多动几个参数。0 = 不限制。
+
+        为什么需要它：把三十个勾选的参数一起掷一遍，出来的是"另一个音色"而不是
+        "这个音色的变体"——每一维都动了，听不出是哪一维在起作用。
+        限成 1~2 个之后每次改动都可归因，才谈得上"慢慢挑到喜欢的"。
+
+        选哪几个是**每次重新随机**的，不是固定前 N 个。 */
+    int maxParams = 0;
+
     /** lo > hi 时交换，与 Lua 版一致。 */
     void normalise() noexcept { if (lo > hi) std::swap (lo, hi); }
 };
+
+/** 从候选下标里随机保留最多 maxCount 个，就地改写 candidates。
+    maxCount <= 0 或候选数已经不超过它时原样返回。
+
+    用部分 Fisher-Yates：只洗前 maxCount 个位置，不分配、不排序。
+    随机化和运动模式的音色层共用这一份——两边各写一遍的话，
+    "每次只动 N 个"在两条路径上的含义迟早会悄悄跑偏。 */
+void subsample (juce::Array<int>& candidates, int maxCount, juce::Random& rng);
 
 struct RandomResult
 {
@@ -39,6 +56,7 @@ bool randomizeOne (juce::AudioProcessorParameter& p,
                    juce::Random& rng);
 
 /** 批量随机化，只动 checked[i] == true 的参数。
+    `settings.maxParams > 0` 时先随机抽出这么多个，其余这一轮不碰。
 
     必须在消息线程上调用：一次重掷是几百次 setValueNotifyingHost，
     在音频线程上做等于当场分配内存加抢锁。

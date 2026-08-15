@@ -11,6 +11,7 @@ namespace ids
     static const juce::Identifier name      { "name" };
     static const juce::Identifier values    { "values" };
     static const juce::Identifier child     { "child" };
+    static const juce::Identifier pluginId  { "pluginId" };   // v3 起；老工程里没有
 }
 
 // 权重最大者换人的门槛。没有这个迟滞，在 pad 对角线上来回微动会让
@@ -32,14 +33,29 @@ Snapshot captureSnapshot (juce::AudioPluginInstance& plugin, const juce::String&
 
     plugin.getStateInformation (s.childState);
 
+    s.pluginId = plugin.getPluginDescription().createIdentifierString();
     s.name = name;
     s.used = true;
     return s;
 }
 
+bool snapshotMatchesPlugin (const Snapshot& s, const juce::AudioPluginInstance& plugin)
+{
+    // 老工程存的快照没有 pluginId。那个年代链上只有一位，混不起来，所以放行。
+    if (s.pluginId.isEmpty())
+        return true;
+
+    return s.pluginId == plugin.getPluginDescription().createIdentifierString();
+}
+
 bool restoreSnapshot (const Snapshot& s, juce::AudioPluginInstance& plugin)
 {
     if (! s.used)
+        return false;
+
+    // 插件对不上就什么都不做。childState 是那个插件私有的字节流，
+    // 喂给别的插件轻则被忽略、重则崩溃或者污染它的内部状态。
+    if (! snapshotMatchesPlugin (s, plugin))
         return false;
 
     if (s.childState.getSize() > 0)
@@ -221,6 +237,19 @@ int SnapshotBank::applyMorph (juce::AudioPluginInstance& plugin,
     const auto  numParams = (size_t) params.size();
     int written = 0;
 
+    // 这一份快照能不能用在这个插件上？
+    //
+    // 光比参数个数不够：两个不同插件参数数相同的情况一点都不罕见（同厂的
+    // 姊妹产品、同一插件的两个版本），那时插值出来的是两组毫无关系的值的平均。
+    // 所以先比身份，再比长度。
+    const auto usable = [this, numParams, &plugin] (int slot)
+    {
+        const auto& s = slots[(size_t) slot];
+        return s.used
+            && s.values.size() == numParams
+            && snapshotMatchesPlugin (s, plugin);
+    };
+
     for (int k = 0; k < model.size(); ++k)
     {
         if (k >= checked.size() || ! checked.getUnchecked (k))
@@ -245,10 +274,10 @@ int SnapshotBank::applyMorph (juce::AudioPluginInstance& plugin,
             float acc = 0.0f, sum = 0.0f;
             for (int i = 0; i < w.n; ++i)
             {
-                const auto& s = slots[(size_t) w.e[(size_t) i].slot];
-                if (s.values.size() != numParams || idx >= s.values.size())
-                    continue;                           // 快照是另一个插件的，跳过
-                acc += s.values[idx] * w.e[(size_t) i].w;
+                const int slot = w.e[(size_t) i].slot;
+                if (! usable (slot))
+                    continue;
+                acc += slots[(size_t) slot].values[idx] * w.e[(size_t) i].w;
                 sum += w.e[(size_t) i].w;
             }
             if (sum <= 0.0f)
@@ -258,10 +287,9 @@ int SnapshotBank::applyMorph (juce::AudioPluginInstance& plugin,
         else
         {
             // toggle / stepped 没有"中间态"，权重最大的 slot 说了算
-            const auto& s = slots[(size_t) winner];
-            if (s.values.size() != numParams || idx >= s.values.size())
+            if (! usable (winner))
                 continue;
-            v = s.values[idx];
+            v = slots[(size_t) winner].values[idx];
         }
 
         v = juce::jlimit (0.0f, 1.0f, v);
@@ -294,6 +322,11 @@ juce::ValueTree snapshotToValueTree (const Snapshot& s, const juce::Identifier& 
     if (s.childState.getSize() > 0)
         node.setProperty (ids::child, juce::var (s.childState), nullptr);
 
+    // 身份也要存。不然工程重开之后校验就失效了，而"切错链位召回快照"
+    // 恰恰最容易在重开工程、界面还没看清的时候发生。
+    if (s.pluginId.isNotEmpty())
+        node.setProperty (ids::pluginId, s.pluginId, nullptr);
+
     return node;
 }
 
@@ -316,6 +349,9 @@ Snapshot snapshotFromValueTree (const juce::ValueTree& node)
 
     if (const auto* mb = node.getProperty (ids::child).getBinaryData())
         s.childState = *mb;
+
+    // 老工程里没有这个属性 → 留空 → 校验放行（那时链上只有一位，混不起来）。
+    s.pluginId = node.getProperty (ids::pluginId, juce::String()).toString();
 
     // 两样都空就当没存过——否则会拿一份空快照去"精确还原"，把插件清成默认值
     if (s.values.empty() && s.childState.getSize() == 0)

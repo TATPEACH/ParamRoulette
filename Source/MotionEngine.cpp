@@ -1,4 +1,5 @@
 #include "MotionEngine.h"
+#include "Randomizer.h"   // subsample：「每次只动 N 个」在音色层和普通随机化上共用一份实现
 
 namespace pr
 {
@@ -217,8 +218,9 @@ juce::String roleLabel (Role r)
 
 void MotionSettings::normalise() noexcept
 {
-    motion = juce::jlimit (0.0f, 1.0f, motion);
-    tone   = juce::jlimit (0.0f, 1.0f, tone);
+    motion  = juce::jlimit (0.0f, 1.0f, motion);
+    tone    = juce::jlimit (0.0f, 1.0f, tone);
+    maxTone = juce::jmax (0, maxTone);      // 负数和 0 同义（不限制），统一成 0
 }
 
 //==============================================================================
@@ -503,9 +505,35 @@ MotionResult applyMotion (juce::AudioPluginInstance& plugin,
     };
 
     // —— 音色层：围绕基座抖，幅度按角色分档
-    for (int i = 0; i < prof.hits.size(); ++i)
-        if (const float span = jitterSpan (prof.hits.getReference (i).role); span > 0.0f)
+    //
+    // 先收候选、再抽样、最后才抖。候选**必须先过勾选**：抽中两个没勾的参数
+    // 等于这一轮什么都没抖，用户设「只动 2」会时不时得到"一个都没动"。
+    // （落笔那一轮会跳过没勾的，所以没勾的参数占掉名额就是纯浪费。）
+    {
+        juce::Array<int> toneHits;
+        toneHits.ensureStorageAllocated (prof.hits.size());
+
+        for (int i = 0; i < prof.hits.size(); ++i)
+        {
+            const auto& h = prof.hits.getReference (i);
+
+            if (jitterSpan (h.role) <= 0.0f)
+                continue;
+
+            if (h.modelIndex < checked.size() && ! checked.getUnchecked (h.modelIndex))
+                continue;
+
+            toneHits.add (i);
+        }
+
+        subsample (toneHits, st.maxTone, rng);
+
+        for (const int i : toneHits)
+        {
+            const float span = jitterSpan (prof.hits.getReference (i).role);
             want[(size_t) i] += (rng.nextFloat() * 2.0f - 1.0f) * span * st.tone;
+        }
+    }
 
     // —— 运动层
     if (st.semantic != MotionSemantic::Preserve)

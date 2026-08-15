@@ -3,8 +3,12 @@
 #include "ParamModel.h"
 #include "Randomizer.h"
 #include "SnapshotBank.h"
+#include "HistoryRing.h"
 #include "MotionEngine.h"
 #include "ContourIO.h"
+#include "ChainRunner.h"
+#include "OutputGuard.h"
+#include "HostedSlot.h"
 #include "PluginScanner.h"
 
 namespace pr
@@ -62,20 +66,53 @@ public:
     void setStateInformation (const void* data, int size) override;
 
     //==============================================================================
-    // 托管
+    // 托管。**一条链，最多 kMaxChain 个链位**，串联跑。
+    //
+    // 「链位」和「快照」是两个不同的东西，别混：链位是信号路径上的位置（6 个），
+    // 快照是存下来的音色（4 个，kNumSlots）。
+    //
+    // 界面上的一切操作（随机化 / 快照 / 运动模式 / 列表）都作用在**当前聚焦的
+    // 链位**上。所以 getModel() 之类的取值接口全部转发到 chain[focused]，
+    // PluginEditor 那千把行几乎不用改。
     using LoadCallback = std::function<void (const juce::String& error)>;
 
-    /** 异步加载。慢插件（Serum 之类要读几百兆采样）不会卡住界面。
+    /** 异步加载到指定链位。慢插件（Serum 之类要读几百兆采样）不会卡住界面。
         回调在消息线程上跑；error 为空表示成功。 */
-    void loadPlugin (const juce::PluginDescription& desc, LoadCallback onDone = {});
+    void loadPluginIntoSlot (int chainSlot, const juce::PluginDescription&, LoadCallback onDone = {});
+    void unloadSlot (int chainSlot);
+
+    /** 加载到**当前聚焦的**链位。老代码路径，保持不变。 */
+    void loadPlugin (const juce::PluginDescription& desc, LoadCallback onDone = {})
+    { loadPluginIntoSlot (focused, desc, std::move (onDone)); }
+
     void loadPluginById (const juce::String& identifier, LoadCallback onDone = {});
-    void unloadPlugin();
+    void unloadPlugin() { unloadSlot (focused); }
 
     bool isLoading() const noexcept                             { return loading; }
-    juce::AudioPluginInstance* getHosted() const noexcept       { return hosted.get(); }
-    const juce::PluginDescription& getHostedDescription() const noexcept { return hostedDesc; }
+
+    //== 链位 ==================================================================
+    int  getFocusedSlot() const noexcept                        { return focused; }
+    void setFocusedSlot (int chainSlot);
+
+    bool         isSlotLoaded (int chainSlot) const;
+    juce::String getSlotName (int chainSlot) const;
+
+    /** 旁通一个链位。旁通是**位置**的属性，换插件不会重置它。 */
+    bool isSlotBypassed (int chainSlot) const;
+    void setSlotBypassed (int chainSlot, bool);
+
+    /** 链上一共装了几个插件。界面用它决定要不要显示链相关的东西。 */
+    int getNumLoadedSlots() const;
+
+    //== 当前聚焦链位的转发 ====================================================
+    juce::AudioPluginInstance* getHosted() const noexcept       { return cur().plugin.get(); }
+    const juce::PluginDescription& getHostedDescription() const noexcept { return cur().desc; }
     juce::String getHostedName() const;
     juce::String getHostedId() const;
+
+    /** 指定链位的插件实例。界面开浮动窗口要用（每链位一个窗口）。 */
+    juce::AudioPluginInstance* getSlotPlugin (int chainSlot) const;
+
 
     //==============================================================================
     // 子插件的 preset / program。
@@ -93,10 +130,10 @@ public:
     void setHostedProgram (int index);
 
     //==============================================================================
-    // 状态（editor 直接读写这几个）
+    // 状态（editor 直接读写这几个）。全部指向**当前聚焦的链位**。
     PluginScanner&          getScanner()  noexcept              { return scanner; }
-    juce::Array<ParamInfo>& getModel()    noexcept              { return model; }
-    juce::Array<bool>&      getChecked()  noexcept              { return checked; }
+    juce::Array<ParamInfo>& getModel()    noexcept              { return cur().model; }
+    juce::Array<bool>&      getChecked()  noexcept              { return cur().checked; }
     SnapshotBank&           getBank()     noexcept              { return bank; }
     InertProbe&             getProbe()    noexcept              { return probe; }
     RandomResult            getLastResult() const noexcept      { return lastResult; }
@@ -125,28 +162,49 @@ public:
     void clearSlot (int slot);
 
     //==============================================================================
+    // 随机化历史（「上一个 / 下一个」）。
+    //
+    // 没有它的话，随机到好声音**之前**那一版就永久没了——而"上一个其实更好"
+    // 是这类工具最常见的懊悔。插件内部没有 undo，这是替代品。
+    //
+    // 不进工程状态：20 份子插件状态块塞进 .rpp 会让工程文件膨胀到不可接受。
+    bool historyBack();
+    bool historyForward();
+    bool canHistoryBack()    const noexcept { return cur().history.canBack(); }
+    bool canHistoryForward() const noexcept { return cur().history.canForward(); }
+
+    /** 当前在第几个状态上（0 起）。 */
+    int getHistoryPos() const noexcept { return cur().history.getPos(); }
+
+    /** 一共有几个状态可回。 */
+    int getHistoryCount() const noexcept { return cur().history.getCount(); }
+
+    //==============================================================================
     // 运动模式
     bool isMotionMode() const noexcept              { return motionMode; }
     void setMotionMode (bool on);
 
-    const MotionProfile&  getMotionProfile()  const noexcept { return motionProfile; }
-    MotionSettings        getMotionSettings() const noexcept { return motionSettings; }
+    const MotionProfile&  getMotionProfile()  const noexcept { return cur().profile; }
+
+    /** 运动 / 音色强度和「每次只动 N 个」现在**存在可自动化参数里**，不是普通成员。
+        所以这个函数每次从参数读，不缓存——否则 DAW 画的自动化曲线不会生效。 */
+    MotionSettings        getMotionSettings() const;
     void                  setMotionSettings (MotionSettings);
     MotionResult          getLastMotion()     const noexcept { return lastMotion; }
 
     /** 上一次生成改写了几条包络曲线。0 = 这个插件的轮廓不是可识别格式，
         或者语义是「保持」。界面用它告诉用户曲线到底动没动。 */
-    int getLastContoursWritten() const noexcept { return lastContoursWritten; }
+    int getLastContoursWritten() const noexcept { return cur().lastContoursWritten; }
 
     /** 加载时探到的可识别轮廓组数。>0 表示这个插件的包络曲线能被改写
         （走状态块，不是走参数）。0 表示只能动参数层。 */
-    int getContourGroups() const noexcept { return contourGroups; }
+    int getContourGroups() const noexcept { return cur().contourGroups; }
 
     /** 锁定基座：把当前状态抓成一份快照，之后每次生成都从它出发。
         不锁的话连点十次会越走越远——那是随机游走，不是"生成变体"。 */
     bool lockMotionBase();
     bool restoreMotionBase();
-    bool hasMotionBase() const noexcept             { return motionBase.used; }
+    bool hasMotionBase() const noexcept             { return cur().base.used; }
 
     /** 基座的身份标签，形如 `bird 5 #3`。
 
@@ -155,9 +213,9 @@ public:
         `#N` 每次重锁 +1，所以点一下「重设基座」这个数就该变；不变就是没生效。 */
     juce::String getMotionBaseLabel() const;
 
-    /** 从工程状态里恢复基座。只在 applyPendingState 的加载回调里用——
+    /** 从工程状态里恢复某个链位的基座。只在 applyPendingState 的加载回调里用——
         必须在 installHosted 把基座清掉**之后**才轮到它。 */
-    void restoreMotionBaseFromTree (const juce::ValueTree&);
+    void restoreMotionBaseFromTree (int chainSlot, const juce::ValueTree&);
 
     /** 把当前勾选状态写进 PropertiesFile，下次加载同一个插件时还原。 */
     void saveExclusionsNow();
@@ -167,6 +225,10 @@ public:
 
     //==============================================================================
     // 暴露给 DAW 自动化的参数。构造时一次性建好——VST3 的参数表不能中途增删。
+    //
+    // 注意"不能中途增删"说的是**运行时**。编译期在这里追加新参数是安全的：
+    // VST3 宿主按参数 ID（JUCE 拿 ParameterID 字符串哈希出来的）匹配自动化，
+    // 不按下标，所以老工程画在 Morph X 上的曲线不会因为后面多了几个参数而错位。
     juce::AudioParameterFloat*  pMorphX    = nullptr;
     juce::AudioParameterFloat*  pMorphY    = nullptr;
     juce::AudioParameterFloat*  pAmount    = nullptr;
@@ -175,15 +237,37 @@ public:
     juce::AudioParameterBool*   pRandomize = nullptr;
     juce::AudioParameterChoice* pMorphMode = nullptr;
 
+    // 后加的三个。运动 / 音色强度以前是普通成员、画不了自动化——
+    // 而"让音色强度跟着一条曲线走"恰好是这套语义系统最自然的用法。
+    juce::AudioParameterFloat*  pMotionAmt = nullptr;
+    juce::AudioParameterFloat*  pToneAmt   = nullptr;
+
+    /** 每次最多动几个参数。0 = 不限。普通随机化和运动模式的**音色层**共用它。
+        （运动层不受限，见 MotionSettings::maxTone 的说明。） */
+    juce::AudioParameterInt*    pMaxParams = nullptr;
+
+    // 链尾安全网。默认**开着**——随机化把全通反馈拉满炸出 +40 dB 或 NaN
+    // 是完全现实的结果，而爆音伤耳朵、NaN 会污染整条总线。
+    juce::AudioParameterFloat*  pCeiling  = nullptr;
+    juce::AudioParameterBool*   pGuardOn  = nullptr;
+
+    /** 链尾 limiter 最近一块的增益衰减（dB），给界面显示。 */
+    float getGuardGrDb() const noexcept { return outputGuard.getGainReductionDb(); }
+
+    /** 子插件吐过非法样本吗？读一次就清。
+        界面必须把它显示出来——否则用户只听到突然静音，完全不知道发生了什么。 */
+    bool consumeSawNonFinite() noexcept { return outputGuard.consumeSawNonFinite(); }
+
     MorphMode getMorphMode() const noexcept
     {
         return pMorphMode->getIndex() == 1 ? MorphMode::TwoD : MorphMode::OneD;
     }
 
     //==============================================================================
-    /** editor 装的钩子：换插件前必须**同步**关掉子插件的浮动窗口。
-        窗口归 editor 所有（JUCE 的规矩：界面的东西归界面管），但销毁时机归这里定。 */
-    std::function<void()> closeHostedWindow;
+    /** editor 装的钩子：换插件前必须**同步**关掉那个链位的浮动窗口。
+        窗口归 editor 所有（JUCE 的规矩：界面的东西归界面管），但销毁时机归这里定。
+        参数是链位号；传 -1 表示"全关"。 */
+    std::function<void (int chainSlot)> closeHostedWindow;
 
     /** 界面上的 filter 文本 / "仅显示匹配"，放这里是为了能进工程状态。 */
     juce::String filterText;
@@ -207,45 +291,60 @@ private:
 
     static BusesProperties makeBuses();
 
-    void installHosted (std::unique_ptr<juce::AudioPluginInstance> next,
+    /** 当前聚焦的链位。所有"就一个插件"的老代码路径都走它。 */
+    HostedSlot&       cur()       noexcept { return chain[(size_t) focused]; }
+    const HostedSlot& cur() const noexcept { return chain[(size_t) focused]; }
+
+    void installHosted (int chainSlot,
+                        std::unique_ptr<juce::AudioPluginInstance> next,
                         const juce::PluginDescription& desc);
     void prepareHosted (juce::AudioPluginInstance& p, double sr, int bs);
-    void rebuildModel();
-    void applyStoredExclusions();
+    void prepareSlot (HostedSlot&, double sr, int bs);
+
+    /** 重算链上的总延迟并报给 DAW。任何一位的延迟变了都要调。 */
+    void updateChainLatency();
+
+    void rebuildModel (int chainSlot);
+    void applyStoredExclusions (int chainSlot);
     void applyMorphNow();
     void applyPendingState();
+
+    /** 把当前状态压进历史。改动状态的动作**之前**调。
+        morph 拖动绝不调——30Hz 会在几秒内填满整个环。 */
+    void pushHistory();
+
+    /** 还原历史里的一份，并把"旧 → 新"和「仅改动」视图一起更新。 */
+    void applyHistoryEntry (const Snapshot&);
 
     //==============================================================================
     PluginScanner scanner;
     SnapshotBank  bank;
     InertProbe    probe;
     juce::Random  rng;
+    OutputGuard   outputGuard;
 
-    std::unique_ptr<juce::AudioPluginInstance> hosted;
-    juce::PluginDescription                    hostedDesc;
-    bool                                       loading = false;
+    /** 一条链。每位持有自己的插件、参数模型、勾选表、基座、历史。
 
-    juce::Array<ParamInfo> model;
-    juce::Array<bool>      checked;
-    RandomResult           lastResult;
-    int                    lastChangedCount = 0;
+        为什么每位都要一份勾选表和基座：一条链上的 EQ 和 disperser，
+        "我不想随机这些"完全是两回事，共享一份等于互相打乱。 */
+    std::array<HostedSlot, kMaxChain> chain;
 
-    // 运动模式。基座是一份完整快照（值 + 子插件状态块），所以"回到基座"是精确的。
+    /** 界面上正在操作哪个链位。**不影响音频**，只决定"随机化/列表作用在谁身上"。 */
+    int  focused = 0;
+    bool loading = false;
+
+    // —— 「上一次操作」的结果。全局一份就够：同一时刻只会有一个操作在跑。
+    RandomResult lastResult;
+    int          lastChangedCount = 0;
+    MotionResult lastMotion;
+
+    // 运动模式的开关和语义是全局的（"我现在要生成变体"是个模式，不是某个插件的属性）。
+    // 基座 / profile / 轮廓那些都是**每链位**的，在 HostedSlot 里。
+    //
+    // 强度那两个数也不在这里——它们是可自动化参数（pMotionAmt / pToneAmt），
+    // 见 getMotionSettings()。
     bool           motionMode = false;
-    MotionProfile  motionProfile;
-    MotionSettings motionSettings;
-    MotionResult   lastMotion;
-    Snapshot       motionBase;
-    int            motionBaseProgram = -1;  ///< 锁定基座时插件在哪个 program
-    juce::String   motionBaseName;          ///< 锁定时那个 program 的名字
-    int            motionBaseGeneration = 0;///< 重锁次数，界面上显示成 #N
-    int            lastContoursWritten = 0;
-    int            contourGroups = 0;
-
-    /** 子插件要的通道数比宿主给的多时用的暂存区（合成器挂在效果器版上会这样）。
-        在 prepareHosted 里分配好，音频线程只读不分配。 */
-    juce::AudioBuffer<float> hostedScratch;
-    int                      hostedChannels = 0;
+    MotionSemantic motionSemantic = MotionSemantic::Rise;
 
     std::atomic<bool> morphDirty        { false };
     std::atomic<bool> randomPending     { false };

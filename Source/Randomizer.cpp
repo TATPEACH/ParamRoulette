@@ -44,6 +44,24 @@ bool randomizeOne (juce::AudioProcessorParameter& p,
     return std::abs (v - cur) > kMoveEpsilon;
 }
 
+void subsample (juce::Array<int>& candidates, int maxCount, juce::Random& rng)
+{
+    if (maxCount <= 0 || candidates.size() <= maxCount)
+        return;
+
+    // 部分 Fisher-Yates：第 i 轮从 [i, n) 里挑一个换到 i 位。
+    // 只走 maxCount 轮，所以代价是 O(maxCount) 而不是洗完整个数组。
+    const int n = candidates.size();
+    for (int i = 0; i < maxCount; ++i)
+    {
+        const int j = i + rng.nextInt (n - i);
+        if (j != i)
+            candidates.swap (i, j);
+    }
+
+    candidates.removeRange (maxCount, n - maxCount);
+}
+
 RandomResult randomize (juce::AudioPluginInstance& plugin,
                         const juce::Array<ParamInfo>& model,
                         const juce::Array<bool>& checked,
@@ -55,6 +73,12 @@ RandomResult randomize (juce::AudioPluginInstance& plugin,
     const auto& params = plugin.getParameters();
     RandomResult result;
 
+    // 先收候选、再抽样、最后才动手。
+    // 不能边遍历边"按概率跳过"——那样实际改动个数是二项分布，
+    // 用户设 2 会时不时得到 0 个或 5 个，"每次只动 N 个"就不成立了。
+    juce::Array<int> candidates;
+    candidates.ensureStorageAllocated (model.size());
+
     for (int k = 0; k < model.size(); ++k)
     {
         if (k >= checked.size() || ! checked.getUnchecked (k))
@@ -64,13 +88,21 @@ RandomResult randomize (juce::AudioPluginInstance& plugin,
         if (! juce::isPositiveAndBelow (info.index, params.size()))
             continue;
 
-        if (auto* p = params[info.index])
-        {
-            ++result.touched;
-            if (randomizeOne (*p, info.kind, info.numSteps,
-                              settings.amount, settings.lo, settings.hi, rng))
-                ++result.moved;
-        }
+        if (params[info.index] != nullptr)
+            candidates.add (k);
+    }
+
+    subsample (candidates, settings.maxParams, rng);
+
+    for (const int k : candidates)
+    {
+        const auto& info = model.getReference (k);
+        auto* p = params[info.index];
+
+        ++result.touched;
+        if (randomizeOne (*p, info.kind, info.numSteps,
+                          settings.amount, settings.lo, settings.hi, rng))
+            ++result.moved;
     }
 
     return result;
