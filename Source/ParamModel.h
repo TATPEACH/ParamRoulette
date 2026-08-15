@@ -78,6 +78,20 @@ struct ParamInfo
         randomize **不受这个影响**——随机挑一个目标是合理的；只有 morph 要守。 */
     bool noInterpolate = false;
 
+    /** 音色层抖动的**逐参数幅度上限**（归一化）。负数 = 用角色默认档。
+
+        为什么需要它：角色默认只有两档（音高 ±0.06 / 音色 ±0.20），线性缩放。
+        而 codex 在 bird 5 上试听得出的建议是逐参数的——`tens ±0.02~0.04`、
+        `lp.f ±0.015~0.03`、`mem x pos ±0.04~0.08`。想同时满足这些，
+        全局那一个"音色强度"滑条做不到：调小了 `mem` 不够动，调大了 `tens` 就过了。
+
+        **只影响音色 / 抖动层，不影响普通随机化。** 普通随机化的语义是
+        "在 [lo,hi] 里取目标"，和"以基座为中心 ± span"是两回事；混在一起会
+        静默改掉现有行为。codex 那张表本来就是"同一只鸟的变体"，正是音色层。 */
+    float span = -1.0f;
+
+    bool hasCustomSpan() const noexcept { return span >= 0.0f; }
+
     // —— 上一次随机化 / 生成变体之前的值，用来在界面上显示"旧 → 新"
     float        prevValue = 0.0f;
     juce::String prevDisplay;

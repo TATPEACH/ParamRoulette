@@ -11,6 +11,7 @@ namespace
     constexpr int kColKind   = 54;
     constexpr int kColWas    = 92;   // 上次操作前的值
     constexpr int kColValue  = 92;   // 当前值
+    constexpr int kColSpan   = 56;   // 音色层抖动幅度（点开菜单改）
     constexpr int kColNote   = 120;
     constexpr int kNameMin   = 110;
 
@@ -134,8 +135,16 @@ void ParamListView::updateContentSize()
 {
     const int w = juce::jmax (viewport.getMaximumVisibleWidth(),
                               kColCheck + kColIndex + kNameMin + kColKind
-                              + kColWas + kColValue + kColNote);
+                              + kColWas + kColValue + kColSpan + kColNote);
     rows.setSize (w, juce::jmax (1, visible.size() * kRowH));
+}
+
+juce::Range<int> ParamListView::spanColumnX() const noexcept
+{
+    // 列是从右往左切的（见 paintRow），所以这里也得从右边算回来。
+    // 两处共用这一个函数，改列宽时不会错位。
+    const int right = rows.getWidth() - kColNote;
+    return { right - kColSpan, right };
 }
 
 int ParamListView::getNumChecked() const noexcept
@@ -245,8 +254,9 @@ void ParamListView::paintRow (juce::Graphics& g, int displayRow, juce::Rectangle
         }
     }
 
-    // 右侧四列先切走，剩下全给名字
+    // 右侧五列先切走，剩下全给名字
     auto note  = r.removeFromRight (kColNote);
+    auto spanCol = r.removeFromRight (kColSpan);
     auto value = r.removeFromRight (kColValue);
     auto was   = r.removeFromRight (kColWas);
     auto kind  = r.removeFromRight (kColKind);
@@ -283,6 +293,20 @@ void ParamListView::paintRow (juce::Graphics& g, int displayRow, juce::Rectangle
     g.drawText ((p.changed ? juce::String::fromUTF8 ("→ ") : juce::String()) + p.display,
                 value, juce::Justification::centredLeft, true);
 
+    // —— 音色层抖动幅度。设过的用亮色 + 下划虚线暗示"这格能点"，
+    // 没设过的显示一个暗淡的 · 表示"用默认档"。
+    if (p.hasCustomSpan())
+    {
+        g.setColour (juce::Colour (0xffc9a0dc));
+        g.drawText (juce::String (p.span, 3), spanCol.reduced (4, 0),
+                    juce::Justification::centredRight, false);
+    }
+    else
+    {
+        g.setColour (juce::Colour (0xff5a5a5a));
+        g.drawText ("·"_u8, spanCol.reduced (4, 0), juce::Justification::centredRight, false);
+    }
+
     // 备注列：体检结论优先于默认排除理由——
     // "写进去没用"比"我默认没勾它"是更要紧的信息。
     juce::String noteText;
@@ -308,6 +332,14 @@ void ParamListView::rowsMouseDown (const juce::MouseEvent& e)
     if (! juce::isPositiveAndBelow (mi, checked.size()))
         return;
 
+    // —— 点在「幅度」列上：开菜单改幅度，**不要**顺手把这一行的勾选也翻掉。
+    // 想改幅度的时候被连带改了随机范围，是那种"我明明没点勾选框"的恼人 bug。
+    if (spanColumnX().contains (e.x))
+    {
+        showSpanMenu (mi);
+        return;
+    }
+
     // 目标值在**按下的那一刻**锁定，整趟拖动都用它。
     // 每行各自取反的话，来回划过同一行会左右横跳，涂不出一条稳定的区间。
     paintValue = ! checked.getUnchecked (mi);
@@ -323,6 +355,50 @@ void ParamListView::rowsMouseDown (const juce::MouseEvent& e)
 
     // **定时器不在这里开。** 边缘自动滚动只能在真拖动时生效——
     // 在 mouseDown 就开的话，一次静止的单击也会触发滚动 + 整段涂抹。
+}
+
+void ParamListView::showSpanMenu (int modelIndex)
+{
+    if (! juce::isPositiveAndBelow (modelIndex, model.size()))
+        return;
+
+    const auto& p = model.getReference (modelIndex);
+
+    // 菜单里这几个值就是 codex 在 bird 5 上试听得出的那张表的取值范围
+    // （tens ±0.02~0.04 / lp.f ±0.015~0.03 / mem ±0.04~0.08 / n.lp ±0.05~0.10）。
+    static constexpr float kPresets[] = { 0.01f, 0.015f, 0.02f, 0.03f, 0.05f, 0.08f, 0.10f, 0.20f };
+
+    juce::PopupMenu m;
+    m.addSectionHeader (p.name + "  —  音色层抖动幅度"_u8);
+    m.addItem (1, "用角色默认档"_u8, true, ! p.hasCustomSpan());
+    m.addSeparator();
+
+    for (int i = 0; i < (int) std::size (kPresets); ++i)
+    {
+        const float v = kPresets[i];
+        m.addItem (10 + i, "±"_u8 + juce::String (v, 3),
+                   true, p.hasCustomSpan() && std::abs (p.span - v) < 1.0e-4f);
+    }
+
+    m.addSeparator();
+    m.addItem (99, "实际幅度 = 这个数 × 音色强度"_u8, false);
+
+    juce::Component::SafePointer<ParamListView> safe (this);
+
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&rows),
+                     [safe, modelIndex] (int choice)
+    {
+        auto* self = safe.getComponent();
+        if (self == nullptr || choice <= 0 || choice == 99)
+            return;
+
+        const float span = (choice == 1) ? -1.0f : kPresets[choice - 10];
+
+        if (self->onSpanChanged != nullptr)
+            self->onSpanChanged (modelIndex, span);
+
+        self->repaint();
+    });
 }
 
 void ParamListView::rowsMouseDrag (const juce::MouseEvent& e)

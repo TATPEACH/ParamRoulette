@@ -123,6 +123,7 @@ set(PR_SOURCES
     Source/PluginScanner.cpp
     Source/HostedPluginWindow.cpp
     Source/ParamListView.cpp
+    Source/PluginTagView.cpp
     Source/MorphPad.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
@@ -142,6 +143,7 @@ set(PR_HEADERS
     Source/PluginScanner.h
     Source/HostedPluginWindow.h
     Source/ParamListView.h
+    Source/PluginTagView.h
     Source/MorphPad.h
     Source/PluginProcessor.h
     Source/PluginEditor.h)
@@ -232,7 +234,10 @@ target_sources(pr_probe PRIVATE
     Source/MotionEngine.cpp
     Source/ContourIO.cpp
     Source/ChainRunner.cpp
-    Source/OutputGuard.cpp)
+    Source/OutputGuard.cpp
+    # 只为了测 guessTag / fnTagLabel（都是 static / free 函数，不构造 PluginScanner，
+    # 所以不会碰 PropertiesFile 和插件表文件）。
+    Source/PluginScanner.cpp)
 
 target_include_directories(pr_probe PUBLIC Source ${PR_VST2_SDK})
 

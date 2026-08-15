@@ -14,12 +14,16 @@ namespace
         l.setColour (juce::Label::textColourId, juce::Colour (0xff9a9a9a));
     }
 
-    /** 扫描窗口。PluginListComponent 自带扫描按钮和进度，这里只给它一个壳。 */
-    class ScanWindow final : public juce::DocumentWindow
+    /** 通用的工具窗口壳子。扫描界面和标签界面都用它——
+        两个都是"一个内容组件 + 一个关闭按钮"，没必要各写一个类。 */
+    class ToolWindow final : public juce::DocumentWindow
     {
     public:
-        ScanWindow (std::unique_ptr<juce::Component> content, std::function<void()> onCloseRequested)
-            : juce::DocumentWindow ("VST3 插件扫描"_u8,
+        ToolWindow (const juce::String& title,
+                    std::unique_ptr<juce::Component> content,
+                    int w, int h,
+                    std::function<void()> onCloseRequested)
+            : juce::DocumentWindow (title,
                                     juce::Colour (0xff2b2b2b),
                                     juce::DocumentWindow::closeButton),
               onClose (std::move (onCloseRequested))
@@ -27,7 +31,7 @@ namespace
             setUsingNativeTitleBar (true);
             setContentOwned (content.release(), false);
             setResizable (true, false);
-            centreWithSize (680, 480);
+            centreWithSize (w, h);
             setVisible (true);
         }
 
@@ -54,11 +58,12 @@ ParamRouletteEditor::ParamRouletteEditor (ParamRouletteProcessor& p)
     setLookAndFeel (&lnf);
 
     //== 顶栏 ====================================================================
-    for (auto* b : { &bPick, &bScan, &bUI, &bUnload })
+    for (auto* b : { &bPick, &bScan, &bTags, &bUI, &bUnload })
         addAndMakeVisible (*b);
 
     bPick.onClick   = [this] { showPluginMenu(); };
     bScan.onClick   = [this] { showScanWindow(); };
+    bTags.onClick   = [this] { showTagWindow(); };
     bUI.onClick     = [this] { toggleHostedWindow(); };
     bUnload.onClick = [this] { doUnload(); };
 
@@ -316,6 +321,12 @@ ParamRouletteEditor::ParamRouletteEditor (ParamRouletteProcessor& p)
         proc.saveExclusionsNow();
         updateStatus();
     };
+
+    list.onSpanChanged = [this] (int modelIndex, float span)
+    {
+        proc.setParamSpan (modelIndex, span);   // 内部会持久化
+        updateStatus();
+    };
     addAndMakeVisible (list);
 
     //== slot + morph ============================================================
@@ -391,6 +402,7 @@ ParamRouletteEditor::~ParamRouletteEditor()
 
     closeHostedWindows (-1);
     scanWindow.reset();
+    tagWindow.reset();
 
     setLookAndFeel (nullptr);
 }
@@ -428,6 +440,8 @@ void ParamRouletteEditor::resized()
         bPick.setBounds (row.removeFromLeft (92));
         row.removeFromLeft (4);
         bScan.setBounds (row.removeFromLeft (60));
+        row.removeFromLeft (4);
+        bTags.setBounds (row.removeFromLeft (60));
         bUnload.setBounds (row.removeFromRight (52));
         row.removeFromRight (4);
         bUI.setBounds (row.removeFromRight (52));
@@ -1061,12 +1075,39 @@ void ParamRouletteEditor::showScanWindow()
 
     juce::Component::SafePointer<ParamRouletteEditor> safe (this);
 
-    scanWindow = std::make_unique<ScanWindow> (proc.getScanner().createListComponent(),
+    scanWindow = std::make_unique<ToolWindow> ("插件扫描"_u8,
+                                               proc.getScanner().createListComponent(),
+                                               680, 480,
                                                [safe]
                                                {
                                                    if (auto* self = safe.getComponent())
                                                        self->closeScanWindow();
                                                });
+}
+
+void ParamRouletteEditor::showTagWindow()
+{
+    if (tagWindow != nullptr)
+    {
+        tagWindow->toFront (true);
+        return;
+    }
+
+    juce::Component::SafePointer<ParamRouletteEditor> safe (this);
+
+    tagWindow = std::make_unique<ToolWindow> ("插件功能标签"_u8,
+                                              std::make_unique<PluginTagView> (proc.getScanner()),
+                                              620, 560,
+                                              [safe]
+                                              {
+                                                  if (auto* self = safe.getComponent())
+                                                      self->closeTagWindow();
+                                              });
+}
+
+void ParamRouletteEditor::closeTagWindow()
+{
+    tagWindow.reset();
 }
 
 void ParamRouletteEditor::closeScanWindow()

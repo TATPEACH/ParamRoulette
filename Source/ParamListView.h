@@ -63,6 +63,14 @@ public:
     /** 勾选状态被用户改动时触发（拖动结束 / 批量按钮），用来落盘。 */
     std::function<void()> onChecksChanged;
 
+    /** 用户在「幅度」列上点了并选了一个值。参数是**模型下标**和新幅度
+        （负数 = 回到角色默认档）。
+
+        为什么是点出菜单而不是在格子里打字：列表是自绘的，塞一个 TextEditor
+        进去要自己管焦点、滚动跟随、Esc 取消一大堆事；而实际要填的值就是
+        codex 那张表里的几个数（0.01~0.10），一个菜单点起来还更快。 */
+    std::function<void (int modelIndex, float span)> onSpanChanged;
+
 private:
     //==============================================================================
     /** 内容组件。只负责把事件转回 owner——所有状态都在 owner 上，
@@ -89,6 +97,11 @@ private:
     bool matches (const ParamInfo&) const;
     int  rowAt (int yInRows) const noexcept;
     void paintRow (juce::Graphics&, int displayRow, juce::Rectangle<int> area);
+
+    /** 「幅度」列的横向范围（在 rows 坐标系里）。点击命中判定和绘制共用它，
+        免得两处各算一遍、改列宽时错位。 */
+    juce::Range<int> spanColumnX() const noexcept;
+    void showSpanMenu (int modelIndex);
 
     //==============================================================================
     juce::Array<ParamInfo>& model;

@@ -2,6 +2,7 @@
 
 #include "PluginProcessor.h"
 #include "ParamListView.h"
+#include "PluginTagView.h"
 #include "MorphPad.h"
 #include "HostedPluginWindow.h"
 
@@ -45,6 +46,10 @@ private:
     void showPluginMenu();
     void showScanWindow();
     void closeScanWindow();
+
+    /** 插件功能标签窗口。它是"随机效果器链"的数据录入口，见 PluginTagView。 */
+    void showTagWindow();
+    void closeTagWindow();
     void loadDescription (const juce::PluginDescription&);
     void toggleHostedWindow();
 
@@ -84,6 +89,7 @@ private:
 
     juce::TextButton bPick   { "选择插件…"_u8 };
     juce::TextButton bScan   { "扫描…"_u8 };
+    juce::TextButton bTags   { "标签…"_u8 };
     juce::TextButton bUI     { "界面"_u8 };
     juce::TextButton bUnload { "卸载"_u8 };
     juce::Label      lPlugin;
@@ -171,6 +177,7 @@ private:
         所以不是"一个窗口轮流显示"。 */
     std::array<std::unique_ptr<HostedPluginWindow>, kMaxChain> hostedWindows;
     std::unique_ptr<juce::DocumentWindow> scanWindow;
+    std::unique_ptr<juce::DocumentWindow> tagWindow;
 
     int          lastGeneration = -1;
     bool         syncing = false;   ///< 参数 → 界面回写中，别再反向推回去

@@ -24,6 +24,7 @@
 #include "ContourIO.h"
 #include "ChainRunner.h"
 #include "OutputGuard.h"
+#include "PluginScanner.h"
 
 #include <iostream>
 
@@ -112,9 +113,12 @@ int main (int argc, char** argv)
     {
         head ("0. PURE LOGIC (no plugin needed)");
 
-        auto check = [&pureFails] (const char* what, bool ok)
+        // 形参是 const String& 而不是 const char*：这样所有含中文的 what 都必须带
+        // `_u8`，和项目里其它地方一条规则。（JUCE 的 operator+= 其实会按 UTF-8 解，
+        // 但构造函数按 ASCII 解——别指望谁记得住这个区别，见 Utf8.h。）
+        auto check = [&pureFails] (const juce::String& what, bool ok)
         {
-            line (String (ok ? "  ok    " : "  FAIL  ") + what);
+            line (juce::String (ok ? "  ok    " : "  FAIL  ") + what);
             if (! ok) ++pureFails;
         };
 
@@ -571,6 +575,64 @@ int main (int argc, char** argv)
                 check ("an empty slot node does not count as used",
                        ! bank.isUsed (0) && bank.numUsed() == 0);
             }
+        }
+
+        //-- guessTag：名字关键词猜功能标签 -----------------------------------
+        // 这是"随机效果器链"配方的数据地基。规则表的**顺序**是关键：
+        // "Allpass Filter" 必须判成全通而不是普通滤波器——两者在配方里完全不同。
+        {
+            auto tag = [] (const char* name) { return pr::PluginScanner::guessTag (name); };
+
+            check ("Disperser -> 相位类"_u8,        tag ("Disperser") == pr::FnTag::Phase);
+            check ("kHs Phaser -> 相位类"_u8,       tag ("kHs Phaser") == pr::FnTag::Phase);
+
+            // 顺序陷阱：这个名字同时含 allpass 和 filter
+            check ("Allpass Filter -> 全通，不是普通滤波器"_u8,
+                   tag ("Allpass Filter") == pr::FnTag::Allpass);
+            check ("带连字符的 all-pass 也认"_u8,
+                   tag ("Vintage All-Pass Network") == pr::FnTag::Allpass);
+
+            check ("Pro-Q -> 均衡"_u8,              tag ("FabFilter Pro-Q 4") == pr::FnTag::EQ);
+            check ("AMEK EQ 200 -> 均衡"_u8,        tag ("AMEK EQ 200") == pr::FnTag::EQ);
+            check ("Cluster Delay -> 延迟"_u8,      tag ("Cluster Delay") == pr::FnTag::Delay);
+            check ("Altiverb -> 混响"_u8,           tag ("Altiverb 8") == pr::FnTag::Reverb);
+            check ("bx_bluechorus2 -> 调制"_u8,     tag ("bx_bluechorus2") == pr::FnTag::Modulation);
+            check ("bx_clipper -> 动态"_u8,         tag ("bx_clipper") == pr::FnTag::Dynamics);
+            check ("OTT -> 动态"_u8,                tag ("OTT") == pr::FnTag::Dynamics);
+            check ("bx_saturator -> 失真饱和"_u8,   tag ("bx_saturator V2") == pr::FnTag::Distortion);
+            check ("GRM PitchAccum -> 变调"_u8,     tag ("GRM PitchAccum") == pr::FnTag::Pitch);
+            check ("GRM Freeze -> 颗粒时间"_u8,     tag ("GRM Freeze Stereo") == pr::FnTag::Granular);
+
+            // —— 下面这几条是**实测踩到的假阳性**，钉住免得回归。
+            // 子串匹配在短模式上很危险，所以 eq / ott / comb 改成整词匹配了。
+            check ("bluechorus 里的 echo 不该把它判成延迟"_u8,
+                   tag ("bx_bluechorus2") != pr::FnTag::Delay);
+            check ("Echoboy 仍然是延迟（整词匹配没伤到它）"_u8,
+                   tag ("EchoBoy") == pr::FnTag::Delay);
+            check ("frequency 里的 eq 不该判成均衡"_u8,
+                   tag ("Frequency Splitter") != pr::FnTag::EQ);
+            check ("bottle 里的 ott 不该判成动态"_u8,
+                   tag ("Bottle Rocket") != pr::FnTag::Dynamics);
+            check ("combo 里的 comb 不该判成滤波器"_u8,
+                   tag ("Guitar Combo") != pr::FnTag::Filter);
+            check ("Comb Filter 还是滤波器"_u8,
+                   tag ("Comb Filter") == pr::FnTag::Filter);
+
+            // 本机实测：69% 的插件名看不出功能（Acustica 那种密码名）。
+            // 这一条钉住"猜不出就老实说不知道"，而不是瞎归一类。
+            check ("密码名猜不出来就返回未分类"_u8,
+                   tag ("ACDD") == pr::FnTag::Unknown
+                && tag ("ACEH") == pr::FnTag::Unknown
+                && tag ("ACGQ") == pr::FnTag::Unknown);
+
+            check ("空名字不崩"_u8,                 tag ("") == pr::FnTag::Unknown);
+            check ("大小写不敏感"_u8,               tag ("DISPERSER") == pr::FnTag::Phase);
+
+            // 标签都得有中文名，否则界面上会出现空白项
+            bool allLabelled = true;
+            for (int i = 0; i < pr::kNumFnTags; ++i)
+                allLabelled = allLabelled && pr::fnTagLabel ((pr::FnTag) i).isNotEmpty();
+            check ("每个标签都有显示名"_u8, allLabelled);
         }
 
         line ();

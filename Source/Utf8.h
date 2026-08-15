@@ -25,6 +25,22 @@ namespace pr
     **`/utf-8` 编译选项解决不了这件事。** 它保证的是字面量里躺着正确的 UTF-8 字节，
     而 JUCE 怎么解释这些字节是 JUCE 的事，两回事。
 
+    ---
+
+    **JUCE 内部有个很坑的不一致，这也是"一律加后缀"这条规则的理由：**
+
+    | 路径 | JUCE 实际用的解码 | 结果 |
+    |---|---|---|
+    | `juce::String ("中文")`（构造函数） | `CharPointer_ASCII` | **乱码** |
+    | `someString + "中文"`（`operator+=`） | `CharPointer_UTF8` | 正确 |
+
+    第二行见 `juce_String.cpp:773`，那里还留了句注释说用 UTF8 是因为"code-path 更快"。
+    也就是说同一个字面量安不安全，取决于它落在哪个重载上——而重载又取决于
+    目标形参是 `const String&` 还是 `const char*`。
+
+    没人记得住这个。所以规则是**无条件加后缀**，而不是"看情况"：
+    加了永远正确，代价只是多三个字符。`Tools/check_utf8_literals.mjs` 按这条规则查。
+
     用法：
 
         lStatus.setText ("未加载插件"_u8, juce::dontSendNotification);

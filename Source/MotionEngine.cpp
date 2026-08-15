@@ -504,7 +504,7 @@ MotionResult applyMotion (juce::AudioPluginInstance& plugin,
                  ? baseOf (model.getReference (modelIndex).index) : 0.5f;
     };
 
-    // —— 音色层：围绕基座抖，幅度按角色分档
+    // —— 音色层：围绕基座抖，幅度按角色分档（可被逐参数 span 覆盖）
     //
     // 先收候选、再抽样、最后才抖。候选**必须先过勾选**：抽中两个没勾的参数
     // 等于这一轮什么都没抖，用户设「只动 2」会时不时得到"一个都没动"。
@@ -513,11 +513,30 @@ MotionResult applyMotion (juce::AudioPluginInstance& plugin,
         juce::Array<int> toneHits;
         toneHits.ensureStorageAllocated (prof.hits.size());
 
+        // 幅度：逐参数设定优先于角色默认档，然后一起乘音色强度。
+        //
+        // **span 只改幅度，不改"谁参与"**：角色默认档为 0 的参数（包络深度、
+        // 反相那些运动层的东西）即使设了 span 也不抖——运动层随后会整个覆写
+        // 它们的目标值，先抖一下纯属白费，还会让用户以为设定没生效。
+        const auto spanOf = [&model] (const RoleHit& h)
+        {
+            const float roleSpan = jitterSpan (h.role);
+
+            if (roleSpan <= 0.0f)
+                return 0.0f;            // 不参与音色层，和 span 无关
+
+            if (juce::isPositiveAndBelow (h.modelIndex, model.size()))
+                if (const auto& info = model.getReference (h.modelIndex); info.hasCustomSpan())
+                    return info.span;
+
+            return roleSpan;
+        };
+
         for (int i = 0; i < prof.hits.size(); ++i)
         {
             const auto& h = prof.hits.getReference (i);
 
-            if (jitterSpan (h.role) <= 0.0f)
+            if (spanOf (h) <= 0.0f)
                 continue;
 
             if (h.modelIndex < checked.size() && ! checked.getUnchecked (h.modelIndex))
@@ -530,7 +549,7 @@ MotionResult applyMotion (juce::AudioPluginInstance& plugin,
 
         for (const int i : toneHits)
         {
-            const float span = jitterSpan (prof.hits.getReference (i).role);
+            const float span = spanOf (prof.hits.getReference (i));
             want[(size_t) i] += (rng.nextFloat() * 2.0f - 1.0f) * span * st.tone;
         }
     }

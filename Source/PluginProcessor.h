@@ -236,6 +236,13 @@ public:
     /** 把当前勾选状态写进 PropertiesFile，下次加载同一个插件时还原。 */
     void saveExclusionsNow();
 
+    /** 设某个参数的音色层抖动幅度（负数 = 用角色默认档）。会立刻持久化。
+        `modelIndex` 是**模型下标**，不是参数下标。 */
+    void setParamSpan (int modelIndex, float span);
+
+    /** 把当前的逐参数幅度写进 PropertiesFile。 */
+    void saveSpansNow();
+
     /** 体检。跑完通过 ChangeBroadcaster 通知界面刷新。 */
     void startInertProbe (std::function<void (int numInert, int numEndpointOnly)> onDone = {});
 
@@ -322,6 +329,7 @@ private:
 
     void rebuildModel (int chainSlot);
     void applyStoredExclusions (int chainSlot);
+    void applyStoredSpans (int chainSlot);
     void applyMorphNow();
     void applyPendingState();
 

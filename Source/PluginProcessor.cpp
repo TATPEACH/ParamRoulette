@@ -39,6 +39,7 @@ namespace ids
     static const juce::Identifier focused   { "focused" };
     static const juce::Identifier ceiling   { "ceiling" };
     static const juce::Identifier guardOn   { "guardOn" };
+    static const juce::Identifier spans     { "spans" };      // "172=0.03,88=0.02"
 }
 
 namespace
@@ -548,6 +549,7 @@ void ParamRouletteProcessor::rebuildModel (int chainSlot)
         slot.checked.add (! info.defaultSkip());
 
     applyStoredExclusions (chainSlot);
+    applyStoredSpans (chainSlot);
 
     // 角色发现只看名字，不看当前值，所以建完模型就能算，不用等用户开运动模式。
     slot.profile = detectProfile (slot.model);
@@ -583,6 +585,57 @@ void ParamRouletteProcessor::applyStoredExclusions (int chainSlot)
 
     for (int i = 0; i < slot.model.size(); ++i)
         slot.checked.set (i, ! ex.contains (slot.model.getReference (i).index));
+}
+
+void ParamRouletteProcessor::applyStoredSpans (int chainSlot)
+{
+    if (! juce::isPositiveAndBelow (chainSlot, kMaxChain))
+        return;
+
+    auto& slot = chain[(size_t) chainSlot];
+    const auto& d = slot.desc;
+
+    if (d.name.isEmpty() && d.fileOrIdentifier.isEmpty())
+        return;
+
+    const auto id = d.createIdentifierString();
+
+    if (id.isEmpty() || ! scanner.hasSpans (id))
+        return;
+
+    const auto spans = scanner.loadSpans (id);
+
+    for (auto& info : slot.model)
+        if (const auto it = spans.find (info.index); it != spans.end())
+            info.span = it->second;
+}
+
+void ParamRouletteProcessor::saveSpansNow()
+{
+    const auto id = getHostedId();
+    if (id.isEmpty())
+        return;
+
+    std::map<int, float> spans;
+    for (const auto& info : cur().model)
+        if (info.hasCustomSpan())
+            spans[info.index] = info.span;
+
+    scanner.saveSpans (id, spans);
+}
+
+void ParamRouletteProcessor::setParamSpan (int modelIndex, float span)
+{
+    auto& m = cur().model;
+
+    if (! juce::isPositiveAndBelow (modelIndex, m.size()))
+        return;
+
+    // 负数统一成 −1（= 用角色默认档）。上限 1.0：再大就超出归一化量程了。
+    m.getReference (modelIndex).span = (span < 0.0f) ? -1.0f : juce::jmin (1.0f, span);
+
+    saveSpansNow();
+    sendChangeMessage();
 }
 
 void ParamRouletteProcessor::saveExclusionsNow()
@@ -1136,6 +1189,17 @@ juce::ValueTree ParamRouletteProcessor::buildStateTree() const
                 slotEx.add (juce::String (s.model.getReference (k).index));
 
         h.setProperty (ids::excluded, slotEx.joinIntoString (","), nullptr);
+
+        // 逐参数抖动幅度。也按插件持久化在 PropertiesFile 里，但工程里也要存一份：
+        // 用户可能在这个工程里给同一个插件调了一套不同的幅度，那属于工程内容。
+        juce::StringArray slotSpans;
+        for (const auto& info : s.model)
+            if (info.hasCustomSpan())
+                slotSpans.add (juce::String (info.index) + "=" + juce::String (info.span, 4));
+
+        if (! slotSpans.isEmpty())
+            h.setProperty (ids::spans, slotSpans.joinIntoString (","), nullptr);
+
         h.addChild (snapshotToValueTree (s.base, ids::BASE), -1, nullptr);
 
         v.addChild (h, -1, nullptr);
@@ -1255,6 +1319,7 @@ void ParamRouletteProcessor::restoreChainFromTree (const juce::ValueTree& v,
         juce::MemoryBlock       childState;
         bool                    hasEx = false;
         juce::String            exCsv;
+        juce::String            spansCsv;
         juce::ValueTree         baseTree;
     };
 
@@ -1293,6 +1358,7 @@ void ParamRouletteProcessor::restoreChainFromTree (const juce::ValueTree& v,
         {
             job.hasEx    = h.hasProperty (ids::excluded);
             job.exCsv    = h.getProperty (ids::excluded).toString();
+            job.spansCsv = h.getProperty (ids::spans).toString();
             job.baseTree = h.getChildWithName (ids::BASE);
         }
 
@@ -1375,6 +1441,30 @@ void ParamRouletteProcessor::restoreChainFromTree (const juce::ValueTree& v,
 
                     for (int k = 0; k < slot.model.size(); ++k)
                         slot.checked.set (k, ! ex.contains (slot.model.getReference (k).index));
+                }
+
+                // 工程里存的逐参数幅度覆盖 PropertiesFile 里那份全局设定：
+                // "我在这个工程里给它调过"比"我一般这么用"更具体。
+                if (job.spansCsv.isNotEmpty())
+                {
+                    auto& slot = s->chain[(size_t) job.slot];
+
+                    for (const auto& tok : juce::StringArray::fromTokens (job.spansCsv, ",", {}))
+                    {
+                        const auto eq = tok.indexOfChar ('=');
+                        if (eq <= 0)
+                            continue;
+
+                        const int   pi  = tok.substring (0, eq).getIntValue();
+                        const float val = tok.substring (eq + 1).getFloatValue();
+
+                        if (val < 0.0f || val > 1.0f)
+                            continue;
+
+                        for (auto& info : slot.model)
+                            if (info.index == pi)
+                                info.span = val;
+                    }
                 }
 
                 s->restoreMotionBaseFromTree (job.slot, job.baseTree);
