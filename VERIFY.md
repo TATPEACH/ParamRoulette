@@ -378,7 +378,9 @@ UTF-8: RESULT: PASS - no mojibake
 - **配方引擎本身没写** —— 「按配方随机选插件」和"神奇按钮"都还不存在。
   这一轮做完的是地基：多插件串联 + 输出天花板 + 链预设 + 功能标签录入
 - **功能标签不驱动任何自动行为**，目前纯粹是给下一步用的数据
-- **pluginval 没跑**（本机没装，见下）
+- ~~pluginval 没跑~~ —— **后来跑了**，见第 2 节：64 位两个产物在 strictness 8
+  下都 SUCCESS，含 `Plugin state` / `Plugin state restoration`。
+  32 位那两个验不了（pluginval.exe 是 64 位的）。
 
 ---
 
@@ -590,20 +592,43 @@ cmake -B build32 -A Win32
 
 ---
 
-## 2. 协议合规：pluginval（不能省）
+## 2. 协议合规：pluginval —— **已跑，两个都 SUCCESS**
 
-下载：<https://github.com/Tracktion/pluginval/releases>
+`pluginval 1.0.4`，`--strictness-level 8`（最高档），`--skip-gui-tests`：
+
+| 产物 | 结果 | 测试组 |
+|---|---|---|
+| `ParamRoulette.vst3`（64 位，效果器版） | **SUCCESS** | 21 |
+| `ParamRoulette Synth.vst3`（64 位，乐器版） | **SUCCESS** | 21 |
+
+零 error、零 warning、零 exception。
+
+**最要紧的两组过了**：`Plugin state` 和 `Plugin state restoration`。
+这一轮刚把工程状态格式从 v2 改到 v3（`HOSTED` 从单节点变多节点）、
+还加了链位的逐个顺序异步加载，正是这两组该逮的地方。
+
+同时过的还有 `Automation` / `Automatable Parameters` / `Parameter thread safety`
+（这一轮新增了 5 个可自动化参数）和 `Fuzz parameters`。
+
+工具装在 `Tools/bin/`（**已 gitignore**，二进制不入库）。重新装：
 
 ```bash
-pluginval.exe --strictness-level 8 --validate "build/ParamRoulette_artefacts/Release/VST3/ParamRoulette.vst3"
+gh release download --repo Tracktion/pluginval --pattern "*Windows*"
 ```
+
+重跑：
 
 ```bash
-pluginval.exe --strictness-level 8 --validate "build/ParamRouletteSynth_artefacts/Release/VST3/ParamRoulette Synth.vst3"
+./Tools/bin/pluginval.exe --strictness-level 8 --skip-gui-tests --validate "build/ParamRoulette_artefacts/Release/VST3/ParamRoulette.vst3"
 ```
 
-它专查这个项目最容易出错的三件事：`getStateInformation`/`setStateInformation` 往返、
-参数的线程使用、bus layout。**注意**：pluginval 只会验宿主本身，不会验被托管的子插件。
+### 两条限制，别当成全过了
+
+- **32 位那两个产物没验过。** `pluginval.exe` 本身是 64 位的，装不下 32 位插件
+  （同一道 Windows 加载器的墙）。而 32 位版恰好是唯一能碰 fauna 的那个。
+  它的覆盖只有无头探针那 84 项 + 你自己在 REAPER 里实测。
+- **pluginval 只验宿主本身，不验被托管的子插件。** 我们把 fauna 灌成什么样，
+  它一概不知道。
 
 ---
 

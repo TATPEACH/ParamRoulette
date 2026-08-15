@@ -14,11 +14,18 @@ cmake-build-*/
 # 32 位构建缺了它会直接 FATAL_ERROR 并把需要的路径打出来，不会静默降级。
 vst2sdk/pluginterfaces/
 
+# ---- 下载来的工具 ----
+# Tools/bin/pluginval.exe 是从 Tracktion/pluginval 的 release 下的，
+# 不该进版本库（二进制、有自己的许可、而且随时能重下）：
+#   gh release download --repo Tracktion/pluginval --pattern "*Windows*"
+Tools/bin/
+
 # ---- 探针 / 调试的中间产物 ----
 # probe_out*.txt 是无头验收测试的输出，随时能重跑生成。
 # fauna_state.bin 是 fauna 的状态块 dump（第三方插件数据）。
 *.log
 probe*.txt
+pv_*.txt
 fauna_state.bin
 
 # ---- 录屏 / 截图 ----

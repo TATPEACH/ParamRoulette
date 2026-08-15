@@ -814,3 +814,13 @@ fauna 的 program 0 叫 `blank`，四条包络内容完全一样，看不出效�
   但 section 0 那一整段照样跑。
 
 - 实测数据和每个修复的证据在 [VERIFY.md](VERIFY.md)
+
+- **协议合规**：`pluginval 1.0.4 --strictness-level 8` 对 64 位那两个产物
+  都是 SUCCESS（21 组，含 `Plugin state restoration`）。工具在 `Tools/bin/`
+  （gitignore 了）。改过状态格式或参数表之后重跑一遍：
+
+  ```bash
+  ./Tools/bin/pluginval.exe --strictness-level 8 --skip-gui-tests --validate "build/ParamRoulette_artefacts/Release/VST3/ParamRoulette.vst3"
+  ```
+
+  32 位那两个**验不了** —— `pluginval.exe` 自己是 64 位的，装不下 32 位插件。
