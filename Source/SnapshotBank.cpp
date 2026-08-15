@@ -7,6 +7,8 @@ namespace ids
 {
     static const juce::Identifier SNAPSHOTS { "SNAPSHOTS" };
     static const juce::Identifier SLOT      { "SLOT" };
+    static const juce::Identifier CHAINPOS  { "CHAINPOS" };   // v3 起：SLOT 下面一层，每链位一个
+    static const juce::Identifier pos       { "pos" };        // 链位号
     static const juce::Identifier used      { "used" };
     static const juce::Identifier name      { "name" };
     static const juce::Identifier values    { "values" };
@@ -74,51 +76,69 @@ bool restoreSnapshot (const Snapshot& s, juce::AudioPluginInstance& plugin)
 }
 
 //==============================================================================
-void SnapshotBank::capture (int slot, juce::AudioPluginInstance& plugin, const juce::String& name)
+void SnapshotBank::capture (int snapSlot, const SnapTarget* targets, int numTargets,
+                            const juce::String& name)
 {
-    if (! juce::isPositiveAndBelow (slot, kNumSlots))
+    if (! juce::isPositiveAndBelow (snapSlot, kNumSlots) || targets == nullptr)
         return;
 
-    slots[(size_t) slot] = captureSnapshot (plugin,
-                                            name.isNotEmpty() ? name
-                                                              : ("Slot " + juce::String (slot + 1)));
+    auto& cs = slots[(size_t) snapSlot];
+    cs = ChainSnapshot {};
+    cs.name = name.isNotEmpty() ? name : ("Slot " + juce::String (snapSlot + 1));
+
+    for (int i = 0; i < juce::jmin (numTargets, kMaxChain); ++i)
+        if (auto* p = targets[i].plugin)
+            cs.perSlot[(size_t) i] = captureSnapshot (*p, cs.name);
+
     currentWinner = -1;
 }
 
-void SnapshotBank::clearSlot (int slot)
+void SnapshotBank::clearSlot (int snapSlot)
 {
-    if (! juce::isPositiveAndBelow (slot, kNumSlots))
+    if (! juce::isPositiveAndBelow (snapSlot, kNumSlots))
         return;
 
-    slots[(size_t) slot] = Snapshot {};
-    if (currentWinner == slot)
+    slots[(size_t) snapSlot] = ChainSnapshot {};
+    if (currentWinner == snapSlot)
         currentWinner = -1;
 }
 
 void SnapshotBank::clearAll()
 {
     for (auto& s : slots)
-        s = Snapshot {};
+        s = ChainSnapshot {};
     currentWinner = -1;
 }
 
-bool SnapshotBank::recall (int slot, juce::AudioPluginInstance& plugin)
+int SnapshotBank::recall (int snapSlot, const SnapTarget* targets, int numTargets)
 {
-    if (! isUsed (slot))
-        return false;
+    if (! isUsed (snapSlot) || targets == nullptr)
+        return 0;
 
-    if (! restoreSnapshot (slots[(size_t) slot], plugin))
-        return false;
+    const auto& cs = slots[(size_t) snapSlot];
+    int restored = 0;
 
-    currentWinner = slot;
-    return true;
+    for (int i = 0; i < juce::jmin (numTargets, kMaxChain); ++i)
+    {
+        auto* p = targets[i].plugin;
+
+        // 身份对不上的链位自动跳过（restoreSnapshot 内部会挡）。
+        // 用户在别的链位装了别的插件之后召回旧快照就是这种情况。
+        if (p != nullptr && restoreSnapshot (cs.perSlot[(size_t) i], *p))
+            ++restored;
+    }
+
+    if (restored > 0)
+        currentWinner = snapSlot;
+
+    return restored;
 }
 
 int SnapshotBank::numUsed() const noexcept
 {
     int n = 0;
     for (auto& s : slots)
-        if (s.used)
+        if (s.anyUsed())
             ++n;
     return n;
 }
@@ -131,7 +151,7 @@ Weights SnapshotBank::computeWeights (MorphMode mode, float x, float y) const
     int used[kNumSlots];
     int nUsed = 0;
     for (int i = 0; i < kNumSlots; ++i)
-        if (slots[(size_t) i].used)
+        if (slots[(size_t) i].anyUsed())
             used[nUsed++] = i;
 
     if (nUsed == 0)
@@ -168,13 +188,13 @@ Weights SnapshotBank::computeWeights (MorphMode mode, float x, float y) const
 
     float sum = 0.0f;
     for (int i = 0; i < kNumSlots; ++i)
-        if (slots[(size_t) i].used)
+        if (slots[(size_t) i].anyUsed())
             sum += raw[i];
 
     if (sum <= 1.0e-9f)
     {
-        // 光标正好落在某个空角上，已用 slot 的权重全是 0。
-        // 退回"raw 最大的那个已用 slot"，至少还是连续的。
+        // 光标正好落在某个空角上，已用快照的权重全是 0。
+        // 退回"raw 最大的那个已用快照"，至少还是连续的。
         int best = used[0];
         for (int i = 1; i < nUsed; ++i)
             if (raw[used[i]] > raw[best])
@@ -184,7 +204,7 @@ Weights SnapshotBank::computeWeights (MorphMode mode, float x, float y) const
     }
 
     for (int i = 0; i < kNumSlots; ++i)
-        if (slots[(size_t) i].used && raw[i] > 0.0f)
+        if (slots[(size_t) i].anyUsed() && raw[i] > 0.0f)
             w.add (i, raw[i] / sum);
 
     return w;
@@ -220,11 +240,12 @@ int SnapshotBank::pickWinner (const Weights& w)
     return currentWinner;
 }
 
-int SnapshotBank::applyMorph (juce::AudioPluginInstance& plugin,
-                              const juce::Array<ParamInfo>& model,
-                              const juce::Array<bool>& checked,
+int SnapshotBank::applyMorph (const SnapTarget* targets, int numTargets,
                               MorphMode mode, float x, float y)
 {
+    if (targets == nullptr)
+        return 0;
+
     const auto w = computeWeights (mode, x, y);
     if (w.isEmpty())
         return 0;
@@ -233,21 +254,46 @@ int SnapshotBank::applyMorph (juce::AudioPluginInstance& plugin,
     if (winner < 0)
         return 0;
 
-    const auto& params    = plugin.getParameters();
+    int written = 0;
+
+    // 逐链位插值。每位各自比身份 —— 用户可能只换了链上某一位的插件，
+    // 那一位跳过、其余照插值，比"整份快照作废"有用得多。
+    for (int slot = 0; slot < juce::jmin (numTargets, kMaxChain); ++slot)
+        written += morphOneSlot (slot, targets[slot], w, winner);
+
+    return written;
+}
+
+int SnapshotBank::morphOneSlot (int chainSlot, const SnapTarget& target,
+                                const Weights& w, int winner)
+{
+    auto* plugin = target.plugin;
+
+    if (plugin == nullptr || target.model == nullptr || target.checked == nullptr)
+        return 0;
+
+    const auto& model   = *target.model;
+    const auto& checked = *target.checked;
+    const auto& params    = plugin->getParameters();
     const auto  numParams = (size_t) params.size();
     int written = 0;
 
-    // 这一份快照能不能用在这个插件上？
+    // 这一份快照能不能用在这个链位的插件上？
     //
     // 光比参数个数不够：两个不同插件参数数相同的情况一点都不罕见（同厂的
     // 姊妹产品、同一插件的两个版本），那时插值出来的是两组毫无关系的值的平均。
     // 所以先比身份，再比长度。
-    const auto usable = [this, numParams, &plugin] (int slot)
+    const auto usable = [this, chainSlot, numParams, plugin] (int snapSlot)
     {
-        const auto& s = slots[(size_t) slot];
+        const auto& s = slots[(size_t) snapSlot].perSlot[(size_t) chainSlot];
         return s.used
             && s.values.size() == numParams
-            && snapshotMatchesPlugin (s, plugin);
+            && snapshotMatchesPlugin (s, *plugin);
+    };
+
+    const auto valueAt = [this, chainSlot] (int snapSlot, size_t idx)
+    {
+        return slots[(size_t) snapSlot].perSlot[(size_t) chainSlot].values[idx];
     };
 
     for (int k = 0; k < model.size(); ++k)
@@ -274,10 +320,10 @@ int SnapshotBank::applyMorph (juce::AudioPluginInstance& plugin,
             float acc = 0.0f, sum = 0.0f;
             for (int i = 0; i < w.n; ++i)
             {
-                const int slot = w.e[(size_t) i].slot;
-                if (! usable (slot))
+                const int snapSlot = w.e[(size_t) i].slot;
+                if (! usable (snapSlot))
                     continue;
-                acc += slots[(size_t) slot].values[idx] * w.e[(size_t) i].w;
+                acc += valueAt (snapSlot, idx) * w.e[(size_t) i].w;
                 sum += w.e[(size_t) i].w;
             }
             if (sum <= 0.0f)
@@ -286,10 +332,10 @@ int SnapshotBank::applyMorph (juce::AudioPluginInstance& plugin,
         }
         else
         {
-            // toggle / stepped 没有"中间态"，权重最大的 slot 说了算
+            // toggle / stepped 没有"中间态"，权重最大的快照说了算
             if (! usable (winner))
                 continue;
-            v = slots[(size_t) winner].values[idx];
+            v = valueAt (winner, idx);
         }
 
         v = juce::jlimit (0.0f, 1.0f, v);
@@ -361,12 +407,35 @@ Snapshot snapshotFromValueTree (const juce::ValueTree& node)
 }
 
 //==============================================================================
+// SNAPSHOTS
+//   └─ SLOT (快照 1..4)           name
+//       └─ CHAINPOS (链位 0..5)   pos + Snapshot 的字段
+//
+// v2 的格式是 SLOT 直接就装 Snapshot 的字段（那时只有一个插件）。
+// 读的那边靠"SLOT 里有没有 CHAINPOS 子节点"分辨，见 restoreFromValueTree。
 juce::ValueTree SnapshotBank::toValueTree() const
 {
     juce::ValueTree root (ids::SNAPSHOTS);
 
     for (int i = 0; i < kNumSlots; ++i)
-        root.appendChild (snapshotToValueTree (slots[(size_t) i], ids::SLOT), nullptr);
+    {
+        const auto& cs = slots[(size_t) i];
+
+        juce::ValueTree node (ids::SLOT);
+        node.setProperty (ids::name, cs.name, nullptr);
+
+        for (int c = 0; c < kMaxChain; ++c)
+        {
+            if (! cs.perSlot[(size_t) c].used)
+                continue;                       // 空链位不写，省掉一堆空节点
+
+            auto child = snapshotToValueTree (cs.perSlot[(size_t) c], ids::CHAINPOS);
+            child.setProperty (ids::pos, c, nullptr);
+            node.appendChild (child, nullptr);
+        }
+
+        root.appendChild (node, nullptr);
+    }
 
     return root;
 }
@@ -384,11 +453,32 @@ void SnapshotBank::restoreFromValueTree (const juce::ValueTree& v)
         if (! node.hasType (ids::SLOT))
             continue;
 
-        auto& s = slots[(size_t) i];
-        s = snapshotFromValueTree (node);
+        auto& cs = slots[(size_t) i];
+        cs.name = node.getProperty (ids::name, juce::String()).toString();
 
-        if (s.name.isEmpty())
-            s.name = "Slot " + juce::String (i + 1);
+        const int numPos = node.getNumChildren();
+
+        if (numPos == 0)
+        {
+            // v2：SLOT 自己就是一份 Snapshot（那时链上只有一位）→ 装进链位 0。
+            cs.perSlot[0] = snapshotFromValueTree (node);
+        }
+        else
+        {
+            for (int c = 0; c < numPos; ++c)
+            {
+                const auto child = node.getChild (c);
+                if (! child.hasType (ids::CHAINPOS))
+                    continue;
+
+                const int pos = juce::jlimit (0, kMaxChain - 1,
+                                              (int) child.getProperty (ids::pos, 0));
+                cs.perSlot[(size_t) pos] = snapshotFromValueTree (child);
+            }
+        }
+
+        if (cs.name.isEmpty())
+            cs.name = "Slot " + juce::String (i + 1);
     }
 }
 

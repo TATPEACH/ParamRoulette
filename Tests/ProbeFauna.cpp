@@ -495,6 +495,84 @@ int main (int argc, char** argv)
                    back.values.size() == s.values.size());
         }
 
+        //-- 快照现在覆盖整条链：v2 / v3 两种格式都要读得进来 -------------------
+        // 这是最容易悄悄坏的地方：格式改了之后老工程的快照如果读错层级，
+        // 表现是"快照还在、召回却没反应"，而不是报错。
+        {
+            const juce::Identifier kSNAPSHOTS { "SNAPSHOTS" };
+            const juce::Identifier kSLOT      { "SLOT" };
+            const juce::Identifier kCHAINPOS  { "CHAINPOS" };
+
+            auto mkSnap = [] (const juce::String& id)
+            {
+                pr::Snapshot s;
+                s.used = true;
+                s.values.assign (8, 0.25f);
+                s.childState.setSize (32, true);
+                s.pluginId = id;
+                return s;
+            };
+
+            // v2：SLOT 自己就是一份 Snapshot（那时链上只有一位）
+            {
+                juce::ValueTree root (kSNAPSHOTS);
+                auto slot = pr::snapshotToValueTree (mkSnap ("PLUG-A"), kSLOT);
+                root.appendChild (slot, nullptr);
+
+                pr::SnapshotBank bank;
+                bank.restoreFromValueTree (root);
+
+                check ("v2 snapshot lands in chain position 0",
+                       bank[0].perSlot[0].used && bank[0].perSlot[0].pluginId == "PLUG-A");
+                check ("v2 snapshot leaves other chain positions empty",
+                       ! bank[0].perSlot[1].used);
+                check ("v2 snapshot counts as used", bank.isUsed (0) && bank.numUsed() == 1);
+            }
+
+            // v3：SLOT 下面每链位一个 CHAINPOS
+            {
+                juce::ValueTree root (kSNAPSHOTS);
+                juce::ValueTree slot (kSLOT);
+                slot.setProperty ("name", "my chain", nullptr);
+
+                // 故意只放链位 2 和 4，而且顺序反着放——读的那边必须靠 pos 属性
+                // 定位，不能靠子节点次序。
+                for (const int pos : { 4, 2 })
+                {
+                    auto child = pr::snapshotToValueTree (mkSnap ("PLUG-" + juce::String (pos)),
+                                                          kCHAINPOS);
+                    child.setProperty ("pos", pos, nullptr);
+                    slot.appendChild (child, nullptr);
+                }
+
+                root.appendChild (slot, nullptr);
+
+                pr::SnapshotBank bank;
+                bank.restoreFromValueTree (root);
+
+                check ("v3 snapshot honours the pos attribute, not child order",
+                       bank[0].perSlot[2].pluginId == "PLUG-2"
+                    && bank[0].perSlot[4].pluginId == "PLUG-4");
+                check ("v3 snapshot leaves unlisted chain positions empty",
+                       ! bank[0].perSlot[0].used && ! bank[0].perSlot[3].used);
+                check ("v3 snapshot keeps the chain preset name",
+                       bank[0].name == "my chain");
+            }
+
+            // 空的 SNAPSHOTS 不能被当成"存过"
+            {
+                juce::ValueTree root (kSNAPSHOTS);
+                juce::ValueTree slot (kSLOT);
+                root.appendChild (slot, nullptr);
+
+                pr::SnapshotBank bank;
+                bank.restoreFromValueTree (root);
+
+                check ("an empty slot node does not count as used",
+                       ! bank.isUsed (0) && bank.numUsed() == 0);
+            }
+        }
+
         line ();
         line (pureFails == 0 ? "  pure logic: ALL PASS"
                              : "  pure logic: " + String (pureFails) + " FAILURE(S)");

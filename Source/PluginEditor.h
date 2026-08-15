@@ -67,6 +67,9 @@ private:
     /** 链位一行：谁被聚焦、哪些装了插件、旁通状态、以及 limiter 的读数。 */
     void refreshChainUI();
 
+    void promptSaveChainPreset();
+    void showChainPresetMenu();
+
     void wireSlider (juce::Slider&, juce::AudioParameterFloat&);
 
     //==============================================================================
@@ -101,6 +104,11 @@ private:
 
     /** 链尾安全网的读数：增益衰减，以及"子插件吐了 NaN"这种必须让用户知道的事。 */
     juce::Label lGuard;
+
+    /** 链预设：把整条链存成文件、跨工程复用。和快照不是一回事——
+        快照是"这个工程里的几个音色"，链预设是"这条链本身"。 */
+    juce::TextButton bChainSave { "存链"_u8 };
+    juce::TextButton bChainLoad { "读链"_u8 };
 
     /** 子插件的 preset 列表。轮廓改的是当前 program 的那条记录，
         所以这个选择器不是锦上添花——没它就只能在 program 0 上转圈。 */

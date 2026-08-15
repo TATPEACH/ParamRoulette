@@ -864,26 +864,41 @@ void ParamRouletteProcessor::restoreMotionBaseFromTree (int chainSlot, const juc
 
 void ParamRouletteProcessor::captureSlot (int slot)
 {
-    auto* p = cur().plugin.get();
+    const auto targets = makeSnapTargets();
 
-    if (p == nullptr)
+    if (getNumLoadedSlots() == 0)
         return;
 
-    bank.capture (slot, *p);
+    bank.capture (slot, targets.data(), (int) targets.size());
     sendChangeMessage();
 }
 
 void ParamRouletteProcessor::recallSlot (int slot)
 {
-    auto* p = cur().plugin.get();
-
-    if (p == nullptr)
+    if (getNumLoadedSlots() == 0)
         return;
 
     pushHistory();
-    bank.recall (slot, *p);
+
+    const auto targets = makeSnapTargets();
+    bank.recall (slot, targets.data(), (int) targets.size());
+
     refreshModelValues();
     sendChangeMessage();
+}
+
+std::array<SnapTarget, kMaxChain> ParamRouletteProcessor::makeSnapTargets()
+{
+    std::array<SnapTarget, kMaxChain> t;
+
+    for (size_t i = 0; i < t.size(); ++i)
+    {
+        t[i].plugin  = chain[i].plugin.get();
+        t[i].model   = &chain[i].model;
+        t[i].checked = &chain[i].checked;
+    }
+
+    return t;
 }
 
 //==============================================================================
@@ -959,14 +974,13 @@ void ParamRouletteProcessor::clearSlot (int slot)
 
 void ParamRouletteProcessor::applyMorphNow()
 {
-    auto& slot = cur();
-
-    // 只存了一个 slot 时权重会全塌到它身上，等于每 33ms 强行召回一次，
+    // 只存了一个快照时权重会全塌到它身上，等于每 33ms 强行召回一次，
     // 用户自己转旋钮都会被拽回去。两个起步才有"插值"可言。
-    if (slot.plugin == nullptr || bank.numUsed() < 2)
+    if (getNumLoadedSlots() == 0 || bank.numUsed() < 2)
         return;
 
-    bank.applyMorph (*slot.plugin, slot.model, slot.checked, getMorphMode(),
+    const auto targets = makeSnapTargets();
+    bank.applyMorph (targets.data(), (int) targets.size(), getMorphMode(),
                      pMorphX->get(), pMorphY->get());
 
     hostedValuesDirty.store (true, std::memory_order_relaxed);
@@ -1063,12 +1077,10 @@ void ParamRouletteProcessor::audioProcessorChanged (
 }
 
 //==============================================================================
-void ParamRouletteProcessor::getStateInformation (juce::MemoryBlock& destData)
+// 工程状态和链预设**共用这一棵树**。两边格式故意一样，免得出现
+// "存工程能还原、读预设还原不了"这种偏差——那种偏差只会在用户真去读预设时才暴露。
+juce::ValueTree ParamRouletteProcessor::buildStateTree() const
 {
-    // 有宿主会在后台线程存工程。拿 callbackLock 挡住换插件那条路径上的指针交换。
-    // （installHosted 在锁内只做三次 move，不会转消息循环，所以不存在死锁。）
-    const juce::ScopedLock sl (getCallbackLock());
-
     juce::ValueTree v (ids::ROOT);
     v.setProperty (ids::version,   3,                      nullptr);
     v.setProperty (ids::amount,    pAmount->get(),         nullptr);
@@ -1131,10 +1143,19 @@ void ParamRouletteProcessor::getStateInformation (juce::MemoryBlock& destData)
 
     v.addChild (bank.toValueTree(), -1, nullptr);
 
+    return v;
+}
+
+void ParamRouletteProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    // 有宿主会在后台线程存工程。拿 callbackLock 挡住换插件那条路径上的指针交换。
+    // （installHosted 在锁内只做三次 move，不会转消息循环，所以不存在死锁。）
+    const juce::ScopedLock sl (getCallbackLock());
+
     // 必须走二进制流。createXml() 会把 var(MemoryBlock) 转成 base64 *字符串*，
     // 读回来就成了 String 而不是 binary，子插件状态直接丢。
     juce::MemoryOutputStream out (destData, false);
-    v.writeToStream (out);
+    buildStateTree().writeToStream (out);
 }
 
 void ParamRouletteProcessor::setStateInformation (const void* data, int sizeInBytes)
@@ -1174,34 +1195,51 @@ void ParamRouletteProcessor::applyPendingState()
     auto v = pendingState;
     pendingState = {};
 
+    // 恢复工程：全局设置也要还原。
+    restoreChainFromTree (v, true);
+}
+
+void ParamRouletteProcessor::restoreChainFromTree (const juce::ValueTree& v,
+                                                   bool restoreGlobals,
+                                                   LoadCallback onDone)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+
     if (! v.isValid())
+    {
+        if (onDone != nullptr)
+            onDone ("状态树无效"_u8);
         return;
+    }
 
-    *pAmount    = (float) v.getProperty (ids::amount,    1.0f);
-    *pRangeLo   = (float) v.getProperty (ids::lo,        0.0f);
-    *pRangeHi   = (float) v.getProperty (ids::hi,        1.0f);
-    *pMorphX    = (float) v.getProperty (ids::morphX,    0.0f);
-    *pMorphY    = (float) v.getProperty (ids::morphY,    0.0f);
-    *pMorphMode = (int)   v.getProperty (ids::morphMode, 0);
+    if (restoreGlobals)
+    {
+        *pAmount    = (float) v.getProperty (ids::amount,    1.0f);
+        *pRangeLo   = (float) v.getProperty (ids::lo,        0.0f);
+        *pRangeHi   = (float) v.getProperty (ids::hi,        1.0f);
+        *pMorphX    = (float) v.getProperty (ids::morphX,    0.0f);
+        *pMorphY    = (float) v.getProperty (ids::morphY,    0.0f);
+        *pMorphMode = (int)   v.getProperty (ids::morphMode, 0);
 
-    filterText   = v.getProperty (ids::filter).toString();
-    onlyMatching = (bool) v.getProperty (ids::onlyMatch, false);
+        filterText   = v.getProperty (ids::filter).toString();
+        onlyMatching = (bool) v.getProperty (ids::onlyMatch, false);
 
-    motionMode = (bool) v.getProperty (ids::motionOn, false);
-    motionSemantic = (MotionSemantic) juce::jlimit (0, kNumMotionSemantics - 1,
-                                                    (int) v.getProperty (ids::semantic,
-                                                                         (int) MotionSemantic::Rise));
+        motionMode = (bool) v.getProperty (ids::motionOn, false);
+        motionSemantic = (MotionSemantic) juce::jlimit (0, kNumMotionSemantics - 1,
+                                                        (int) v.getProperty (ids::semantic,
+                                                                             (int) MotionSemantic::Rise));
 
-    // v2 的工程只有 motionAmt / toneAmt，没有 maxParams——缺省 0（不限制），
-    // 也就是和以前的行为完全一致。
-    *pMotionAmt = (float) v.getProperty (ids::motionAmt, 0.65f);
-    *pToneAmt   = (float) v.getProperty (ids::toneAmt,   0.35f);
-    *pMaxParams = (int)   v.getProperty (ids::maxParams, 0);
+        // v2 的工程只有 motionAmt / toneAmt，没有 maxParams——缺省 0（不限制），
+        // 也就是和以前的行为完全一致。
+        *pMotionAmt = (float) v.getProperty (ids::motionAmt, 0.65f);
+        *pToneAmt   = (float) v.getProperty (ids::toneAmt,   0.35f);
+        *pMaxParams = (int)   v.getProperty (ids::maxParams, 0);
 
-    // 链尾安全网：v2 的工程里没有这两个属性，缺省成"开着、−1 dB"。
-    // 老工程升上来自动获得保护，这是对的默认。
-    *pCeiling = (float) v.getProperty (ids::ceiling, -1.0f);
-    *pGuardOn = (bool)  v.getProperty (ids::guardOn, true);
+        // 链尾安全网：v2 的工程里没有这两个属性，缺省成"开着、−1 dB"。
+        // 老工程升上来自动获得保护，这是对的默认。
+        *pCeiling = (float) v.getProperty (ids::ceiling, -1.0f);
+        *pGuardOn = (bool)  v.getProperty (ids::guardOn, true);
+    }
 
     const int  version = (int) v.getProperty (ids::version, 2);
     const bool legacy  = version < 3;
@@ -1261,16 +1299,21 @@ void ParamRouletteProcessor::applyPendingState()
         jobs->push_back (std::move (job));
     }
 
-    // 先把所有链位清空。恢复的工程可能比现在装的少，残留的插件会继续出声。
+    // 先把所有链位清空。恢复的内容可能比现在装的少，残留的插件会继续出声。
     for (int i = 0; i < kMaxChain; ++i)
         if (chain[(size_t) i].plugin != nullptr)
             unloadSlot (i);
 
     if (jobs->empty())
+    {
+        if (onDone != nullptr)
+            onDone ({});
         return;
+    }
 
     const int wantFocus = juce::jlimit (0, kMaxChain - 1, (int) v.getProperty (ids::focused, 0));
     auto snapTree = std::make_shared<juce::ValueTree> (v.getChildWithName (ids::SNAPSHOTS));
+    auto failures = std::make_shared<juce::StringArray>();
 
     juce::WeakReference<ParamRouletteProcessor> safe (this);
 
@@ -1278,7 +1321,7 @@ void ParamRouletteProcessor::applyPendingState()
     // 递归 lambda 在 C++17 里只能这么写。
     auto step = std::make_shared<std::function<void (size_t)>>();
 
-    *step = [safe, jobs, snapTree, step, wantFocus] (size_t index)
+    *step = [safe, jobs, snapTree, step, wantFocus, failures, onDone] (size_t index)
     {
         auto* self = safe.get();
         if (self == nullptr)
@@ -1286,20 +1329,25 @@ void ParamRouletteProcessor::applyPendingState()
 
         if (index >= jobs->size())
         {
-            // 全部装完才恢复快照和聚焦：快照是整条链的，中途恢复会对不上。
+            // 全部装完才恢复快照和聚焦：快照现在是**整条链**的，
+            // 中途恢复会对不上还没装好的链位。
             self->getBank().restoreFromValueTree (*snapTree);
             self->setFocusedSlot (wantFocus);
 
             self->refreshModelValues();
             ++self->structureGeneration;
             self->sendChangeMessage();
+
+            if (onDone != nullptr)
+                onDone (failures->isEmpty() ? juce::String()
+                                            : ("这些链位没装上："_u8 + failures->joinIntoString ("、"_u8)));
             return;
         }
 
         const auto job = (*jobs)[index];
 
         self->loadPluginIntoSlot (job.slot, job.desc,
-                                 [safe, job, step, index] (const juce::String& error)
+                                 [safe, job, step, index, failures] (const juce::String& error)
         {
             auto* s = safe.get();
             if (s == nullptr)
@@ -1307,28 +1355,30 @@ void ParamRouletteProcessor::applyPendingState()
 
             // 某一位加载失败（插件卸载了 / 换机器了）**不能中断整条链**——
             // 剩下的还得装上，否则一个坏插件会让整个工程变空。
-            if (error.isEmpty())
+            if (error.isNotEmpty())
             {
-                if (auto* h = s->getSlotPlugin (job.slot))
+                failures->add (job.desc.name.isNotEmpty() ? job.desc.name
+                                                          : juce::String (job.slot + 1));
+            }
+            else if (auto* h = s->getSlotPlugin (job.slot))
+            {
+                if (job.childState.getSize() > 0)
+                    h->setStateInformation (job.childState.getData(),
+                                            (int) job.childState.getSize());
+
+                // 顺序有讲究：installHosted 已经把这一位的基座清掉、
+                // 勾选重置成默认了，所以这两步必须在它之后。
+                if (job.hasEx)
                 {
-                    if (job.childState.getSize() > 0)
-                        h->setStateInformation (job.childState.getData(),
-                                                (int) job.childState.getSize());
+                    const auto ex = parseIndexList (job.exCsv);
+                    auto& slot = s->chain[(size_t) job.slot];
 
-                    // 顺序有讲究：installHosted 已经把这一位的基座清掉、
-                    // 勾选重置成默认了，所以这两步必须在它之后。
-                    if (job.hasEx)
-                    {
-                        const auto ex = parseIndexList (job.exCsv);
-                        auto& slot = s->chain[(size_t) job.slot];
-
-                        for (int k = 0; k < slot.model.size(); ++k)
-                            slot.checked.set (k, ! ex.contains (slot.model.getReference (k).index));
-                    }
-
-                    s->restoreMotionBaseFromTree (job.slot, job.baseTree);
-                    s->setSlotBypassed (job.slot, job.bypassed);
+                    for (int k = 0; k < slot.model.size(); ++k)
+                        slot.checked.set (k, ! ex.contains (slot.model.getReference (k).index));
                 }
+
+                s->restoreMotionBaseFromTree (job.slot, job.baseTree);
+                s->setSlotBypassed (job.slot, job.bypassed);
             }
 
             (*step) (index + 1);
@@ -1336,6 +1386,89 @@ void ParamRouletteProcessor::applyPendingState()
     };
 
     (*step) (0);
+}
+
+//==============================================================================
+juce::File ParamRouletteProcessor::getChainPresetDir()
+{
+    auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                  .getChildFile ("ParamRoulette")
+                  .getChildFile ("chains");
+
+    dir.createDirectory();      // 已存在时是无操作
+    return dir;
+}
+
+juce::String ParamRouletteProcessor::saveChainPreset (const juce::String& name)
+{
+    const auto clean = juce::File::createLegalFileName (name).trim();
+
+    if (clean.isEmpty())
+        return "名字不能为空"_u8;
+
+    if (getNumLoadedSlots() == 0)
+        return "链上一个插件都没有，没什么可存的"_u8;
+
+    juce::ValueTree tree;
+    {
+        // 和 getStateInformation 一样的理由：挡住换插件那条路径上的指针交换。
+        const juce::ScopedLock sl (getCallbackLock());
+        tree = buildStateTree();
+    }
+
+    const auto file = getChainPresetDir().getChildFile (clean + ".prchain");
+
+    // 先写临时文件再替换：写到一半崩了不会留下一个半截的预设，
+    // 而半截的预设读出来是"某几位装上了、某几位没有"，很难看出是文件坏了。
+    juce::TemporaryFile temp (file);
+    {
+        juce::FileOutputStream out (temp.getFile());
+
+        if (! out.openedOk())
+            return "写不了 "_u8 + file.getFullPathName();
+
+        tree.writeToStream (out);
+    }
+
+    if (! temp.overwriteTargetFileWithTemporary())
+        return "替换失败 "_u8 + file.getFullPathName();
+
+    return {};
+}
+
+void ParamRouletteProcessor::loadChainPreset (const juce::File& file, LoadCallback onDone)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+
+    juce::FileInputStream in (file);
+
+    if (! in.openedOk())
+    {
+        if (onDone != nullptr)
+            onDone ("读不了 "_u8 + file.getFileName());
+        return;
+    }
+
+    const auto tree = juce::ValueTree::readFromStream (in);
+
+    if (! tree.isValid() || ! tree.hasType (ids::ROOT))
+    {
+        if (onDone != nullptr)
+            onDone ("不是 ParamRoulette 的链预设："_u8 + file.getFileName());
+        return;
+    }
+
+    // restoreGlobals = false：读一条链不该顺手改掉用户当前的随机化强度 /
+    // morph 位置 / 语义选择。那些是"我现在怎么用"，不是"这条链是什么"。
+    restoreChainFromTree (tree, false, std::move (onDone));
+}
+
+juce::Array<juce::File> ParamRouletteProcessor::listChainPresets() const
+{
+    auto files = getChainPresetDir().findChildFiles (juce::File::findFiles, false, "*.prchain");
+
+    files.sort();
+    return files;
 }
 
 } // namespace pr

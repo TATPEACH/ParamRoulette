@@ -155,6 +155,16 @@ ParamRouletteEditor::ParamRouletteEditor (ParamRouletteProcessor& p)
     lGuard.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (lGuard);
 
+    bChainSave.setTooltip ("把整条链（每位的插件 + 状态 + 勾选表）存成一个文件，"_u8
+                           "可以在别的工程里读回来。"_u8);
+    bChainSave.onClick = [this] { promptSaveChainPreset(); };
+    addAndMakeVisible (bChainSave);
+
+    bChainLoad.setTooltip ("读一条存过的链。**会替换当前整条链**，"_u8
+                           "但不动随机化强度 / morph 位置 / 语义那些当前设置。"_u8);
+    bChainLoad.onClick = [this] { showChainPresetMenu(); };
+    addAndMakeVisible (bChainLoad);
+
     //== 「只动 N 个」 ============================================================
     styleCaption (lMaxParams);
     addAndMakeVisible (lMaxParams);
@@ -429,10 +439,14 @@ void ParamRouletteEditor::resized()
 
     r.removeFromTop (6);
 
-    {   // 链位一行：6 个聚焦按钮 + 各自的旁通勾选，右边是 limiter 读数
+    {   // 链位一行：6 个聚焦按钮 + 各自的旁通勾选，右边是存/读链和 limiter 读数
         auto row = r.removeFromTop (24);
 
-        lGuard.setBounds (row.removeFromRight (180));
+        lGuard.setBounds (row.removeFromRight (150));
+        row.removeFromRight (6);
+        bChainLoad.setBounds (row.removeFromRight (48));
+        row.removeFromRight (3);
+        bChainSave.setBounds (row.removeFromRight (48));
         row.removeFromRight (8);
 
         const int cellW = row.getWidth() / kMaxChain;
@@ -626,6 +640,87 @@ void ParamRouletteEditor::syncMotionUI()
         cbSemantic.setSelectedItemIndex (idx, juce::dontSendNotification);
 
     // 两个强度滑条现在跟着参数走，统一在 syncFromParameters 里回写。
+}
+
+void ParamRouletteEditor::promptSaveChainPreset()
+{
+    // 用异步的 AlertWindow：插件里不能开模态循环（JUCE_MODAL_LOOPS_PERMITTED=0），
+    // 那会锁死宿主的消息线程。
+    auto* aw = new juce::AlertWindow ("存成链预设"_u8,
+                                      "给这条链起个名字。存到 "_u8
+                                        + ParamRouletteProcessor::getChainPresetDir().getFullPathName(),
+                                      juce::MessageBoxIconType::NoIcon);
+
+    aw->addTextEditor ("name", proc.getHostedName(), "名字"_u8);
+    aw->addButton ("存"_u8,   1, juce::KeyPress (juce::KeyPress::returnKey));
+    aw->addButton ("取消"_u8, 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    juce::Component::SafePointer<ParamRouletteEditor> safe (this);
+
+    aw->enterModalState (true, juce::ModalCallbackFunction::create ([safe, aw] (int result)
+    {
+        const auto name = aw->getTextEditorContents ("name");
+        std::unique_ptr<juce::AlertWindow> owned (aw);
+
+        auto* self = safe.getComponent();
+        if (self == nullptr || result != 1)
+            return;
+
+        const auto err = self->proc.saveChainPreset (name);
+        self->note = err.isEmpty() ? ("链已存为 "_u8 + name) : err;
+        self->updateStatus();
+    }), false);
+}
+
+void ParamRouletteEditor::showChainPresetMenu()
+{
+    const auto files = proc.listChainPresets();
+
+    juce::PopupMenu m;
+
+    if (files.isEmpty())
+    {
+        m.addItem (-1, "（还没有存过链预设）"_u8, false);
+    }
+    else
+    {
+        for (int i = 0; i < files.size(); ++i)
+            m.addItem (i + 1, files[i].getFileNameWithoutExtension());
+
+        m.addSeparator();
+    }
+
+    m.addItem (9999, "打开预设文件夹…"_u8);
+
+    juce::Component::SafePointer<ParamRouletteEditor> safe (this);
+
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&bChainLoad),
+                     [safe, files] (int choice)
+    {
+        auto* self = safe.getComponent();
+        if (self == nullptr || choice <= 0)
+            return;
+
+        if (choice == 9999)
+        {
+            ParamRouletteProcessor::getChainPresetDir().revealToUser();
+            return;
+        }
+
+        const auto file = files[choice - 1];
+        self->note = "正在读 "_u8 + file.getFileNameWithoutExtension() + " …"_u8;
+        self->updateStatus();
+
+        self->proc.loadChainPreset (file, [safe, file] (const juce::String& error)
+        {
+            if (auto* s = safe.getComponent())
+            {
+                s->note = error.isEmpty() ? ("已读入 "_u8 + file.getFileNameWithoutExtension())
+                                          : error;
+                s->rebuildAll();
+            }
+        });
+    });
 }
 
 void ParamRouletteEditor::refreshChainUI()

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ParamModel.h"
+#include "ChainDefs.h"
 #include <array>
 #include <vector>
 
@@ -34,6 +35,40 @@ struct Snapshot
 };
 
 enum class MorphMode { OneD = 0, TwoD = 1 };
+
+/** 整条链的一份快照 —— 每个链位一份 `Snapshot`。
+
+    为什么是整条链而不是单个插件：一个"音色"在链上就是"这几个插件各自的状态"。
+    只存聚焦那一位的话，用户存了两份快照去 morph，听到的是链上一位在动、
+    其余不动 —— 那不是他以为存下来的那个声音。
+
+    空的链位留着空 `Snapshot`（`used == false`），morph 时自然被跳过，
+    所以"只装了一个插件"的情况完全退化成以前的行为。 */
+struct ChainSnapshot
+{
+    std::array<Snapshot, kMaxChain> perSlot;
+    juce::String name;
+
+    bool anyUsed() const noexcept
+    {
+        for (const auto& s : perSlot)
+            if (s.used)
+                return true;
+        return false;
+    }
+};
+
+/** 快照要操作的东西，每链位一份。
+
+    刻意**不**直接传 `HostedSlot`：那个结构已经 include 了本文件，
+    反向依赖会成环。而且这样也说清了 SnapshotBank 到底需要什么——
+    只要插件指针、参数模型、勾选表三样。 */
+struct SnapTarget
+{
+    juce::AudioPluginInstance*    plugin  = nullptr;
+    const juce::Array<ParamInfo>* model   = nullptr;
+    const juce::Array<bool>*      checked = nullptr;
+};
 
 /** 抓一份快照：全部参数的归一化值（按**参数下标**对齐）+ 子插件完整状态块。
     slot 和「运动模式的基座」共用这一份实现，免得两边各存一套、语义悄悄跑偏。 */
@@ -83,31 +118,33 @@ public:
     SnapshotBank() = default;
 
     //==============================================================================
-    void capture (int slot, juce::AudioPluginInstance& plugin, const juce::String& name = {});
-    void clearSlot (int slot);
+    // 快照现在覆盖**整条链**。targets 按链位下标对齐，空位传默认值即可。
+
+    void capture (int snapSlot, const SnapTarget* targets, int numTargets,
+                  const juce::String& name = {});
+    void clearSlot (int snapSlot);
     void clearAll();
 
-    /** 精确召回：用子插件自己的状态块还原，连宿主看不见的内部状态也一起回来。 */
-    bool recall (int slot, juce::AudioPluginInstance& plugin);
+    /** 精确召回：每链位用它自己的状态块还原，连宿主看不见的内部状态也一起回来。
+        返回实际还原了几个链位。 */
+    int recall (int snapSlot, const SnapTarget* targets, int numTargets);
 
-    const Snapshot& operator[] (int slot) const  { return slots[(size_t) slot]; }
-    bool  isUsed (int slot) const noexcept       { return juce::isPositiveAndBelow (slot, kNumSlots)
-                                                          && slots[(size_t) slot].used; }
+    const ChainSnapshot& operator[] (int snapSlot) const { return slots[(size_t) snapSlot]; }
+    bool  isUsed (int snapSlot) const noexcept   { return juce::isPositiveAndBelow (snapSlot, kNumSlots)
+                                                          && slots[(size_t) snapSlot].anyUsed(); }
     int   numUsed() const noexcept;
 
     //==============================================================================
-    /** 算权重。1D 把 x 铺在"已用 slot"的 N-1 段上；2D 走四角双线性，
-        空 slot 的权重剔除后对剩下的重新归一化。 */
+    /** 算权重。1D 把 x 铺在"已用快照"的 N-1 段上；2D 走四角双线性，
+        空快照的权重剔除后对剩下的重新归一化。 */
     Weights computeWeights (MorphMode mode, float x, float y) const;
 
-    /** 按权重写回。只动 checked[i] == true 的参数，返回实际写了多少个。
-        必须在消息线程上调用。 */
-    int applyMorph (juce::AudioPluginInstance& plugin,
-                    const juce::Array<ParamInfo>& model,
-                    const juce::Array<bool>& checked,
+    /** 按权重写回**整条链**。只动 checked[i] == true 的参数，
+        返回实际写了多少个。必须在消息线程上调用。 */
+    int applyMorph (const SnapTarget* targets, int numTargets,
                     MorphMode mode, float x, float y);
 
-    /** 当前"权重最大者"是哪个 slot（-1 = 没有）。UI 用来高亮。 */
+    /** 当前"权重最大者"是哪个快照（-1 = 没有）。UI 用来高亮。 */
     int  getWinner() const noexcept { return currentWinner; }
     void resetWinner() noexcept     { currentWinner = -1; }
 
@@ -118,7 +155,11 @@ public:
 private:
     int pickWinner (const Weights& w);
 
-    std::array<Snapshot, kNumSlots> slots;
+    /** 给一个链位做插值。拆出来是因为 applyMorph 现在要在 6 个链位上各做一遍，
+        原来那一大坨内联着看不清是"每链位"还是"每快照"的循环。 */
+    int morphOneSlot (int chainSlot, const SnapTarget&, const Weights&, int winner);
+
+    std::array<ChainSnapshot, kNumSlots> slots;
 
     // 迟滞用：权重最大者是全局的（只和权重有关，和具体哪个参数无关），
     // 所以一个 int 就够，不需要每参数一份。

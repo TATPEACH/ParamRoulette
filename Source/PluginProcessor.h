@@ -162,6 +162,22 @@ public:
     void clearSlot (int slot);
 
     //==============================================================================
+    // 链预设：把整条链（每位的插件 + 状态 + 勾选表）存成一个文件。
+    //
+    // 和工程状态是两回事：工程状态跟着 .rpp 走，链预设是**跨工程复用**的——
+    // "我调出来一条好听的 modern rumble 链"应该能在下一首歌里直接调出来。
+    static juce::File getChainPresetDir();
+
+    /** 存成 `<name>.prchain`。返回错误信息，空串 = 成功。 */
+    juce::String saveChainPreset (const juce::String& name);
+
+    /** 读一个链预设。**异步**——要逐个加载插件，完成后走 onDone。 */
+    void loadChainPreset (const juce::File&, LoadCallback onDone = {});
+
+    /** 目录里现有的链预设，按名字排序。 */
+    juce::Array<juce::File> listChainPresets() const;
+
+    //==============================================================================
     // 随机化历史（「上一个 / 下一个」）。
     //
     // 没有它的话，随机到好声音**之前**那一版就永久没了——而"上一个其实更好"
@@ -308,6 +324,20 @@ private:
     void applyStoredExclusions (int chainSlot);
     void applyMorphNow();
     void applyPendingState();
+
+    /** 工程状态和链预设共用的那棵树。见 .cpp 里的说明。 */
+    juce::ValueTree buildStateTree() const;
+
+    /** 给 SnapshotBank 用的链视图。每块现取，不缓存——插件指针会变。 */
+    std::array<SnapTarget, kMaxChain> makeSnapTargets();
+
+    /** 把一棵 ValueTree 恢复成整条链。工程状态和链预设共用这一份实现——
+        两边格式故意一样，免得"存工程能还原、读预设还原不了"这种偏差。
+
+        `restoreGlobals = false` 时只装链，不动 amount / morph / 语义那些全局设置：
+        读链预设不该顺手改掉用户当前的随机化强度。 */
+    void restoreChainFromTree (const juce::ValueTree&, bool restoreGlobals,
+                               LoadCallback onDone = {});
 
     /** 把当前状态压进历史。改动状态的动作**之前**调。
         morph 拖动绝不调——30Hz 会在几秒内填满整个环。 */

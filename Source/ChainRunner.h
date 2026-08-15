@@ -1,16 +1,10 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "ChainDefs.h"
 
 namespace pr
 {
-
-/** 一条链上最多几个位置。
-
-    **注意和快照槽（`kNumSlots`，4 个）区分开。** 两个都叫 slot 的话代码和手册
-    立刻二义化。约定：链上的位置叫「链位」/ ChainSlot，存音色的叫「快照」。
-    6 个足够放"全通 + disperser + 修饰性效果器"这类配方，再多就不好调了。 */
-inline constexpr int kMaxChain = 6;
 
 /** 一个链位在**音频线程**上需要的全部东西。
 

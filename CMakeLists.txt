@@ -135,6 +135,7 @@ set(PR_HEADERS
     Source/HistoryRing.h
     Source/MotionEngine.h
     Source/ContourIO.h
+    Source/ChainDefs.h
     Source/ChainRunner.h
     Source/OutputGuard.h
     Source/HostedSlot.h
