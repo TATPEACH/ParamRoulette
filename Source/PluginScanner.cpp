@@ -28,10 +28,18 @@ namespace
 
     /** 32 位和 64 位构建**必须**用不同的设置文件。
         共用一份的话，64 位版会在插件表里列出一堆它根本加载不了的 32 位插件，
-        反过来也一样——用户点了就是一个加载失败，而且看不出为什么。 */
+        反过来也一样——用户点了就是一个加载失败，而且看不出为什么。
+
+        `PR_SETTINGS_NAME_OVERRIDE` 只给界面截图工具用（Tests/UiSnapshot.cpp）：
+        它会构造整个 processor，不重定向的话析构时 savePluginList() 会去写
+        用户真正的插件表。 */
     juce::String settingsName()
     {
+       #ifdef PR_SETTINGS_NAME_OVERRIDE
+        return PR_SETTINGS_NAME_OVERRIDE;
+       #else
         return sizeof (void*) == 4 ? "ParamRoulette-x86" : "ParamRoulette-x64";
+       #endif
     }
 }
 

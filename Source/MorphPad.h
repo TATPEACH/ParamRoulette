@@ -1,13 +1,10 @@
 #pragma once
 
 #include "SnapshotBank.h"
+#include "Theme.h"
 
 namespace pr
 {
-
-/** 四个 slot 的配色。pad 的角标、列表、slot 按钮共用一套，
-    别各画各的——颜色是用户认 slot 的唯一线索。 */
-juce::Colour slotColour (int slot);
 
 /** 1D 滑条 / 2D pad 二合一的 morph 控件。
 
@@ -69,10 +66,10 @@ private:
     float posY = 0.0f;
     bool  dragging = false;
 
-    static constexpr int   kMargin    = 16;   ///< 给角标和读数留的边距
-    static constexpr int   kReadoutH  = 16;
-    static constexpr float kHandleR   = 8.0f;
-    static constexpr float kSlotR     = 7.0f;
+    static constexpr int   kMargin    = 12;   ///< 给角标留的边距
+    static constexpr int   kReadoutH  = 22;
+    static constexpr float kHandleR   = 9.0f;
+    static constexpr float kSlotR     = 9.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MorphPad)
 };

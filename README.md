@@ -69,20 +69,38 @@ Windows 的加载器不允许 64 位进程加载 32 位 DLL，反之亦然。所
 
 ## 源码地图
 
+![主界面](docs/ui-main.png)
+
 | 文件 | 职责 |
 |---|---|
-| `PluginProcessor` | 宿主本体。托管子插件、透传音频/MIDI、暴露 morph 参数、状态存取 |
-| `PluginEditor` | 主界面装配 |
+| `PluginProcessor` | 宿主本体。托管 6 个链位、串联音频/MIDI、暴露可自动化参数、状态存取 |
+| `PluginEditor` | 主界面装配（顶栏 / 信号链 / 四张卡片 / 状态栏）+ 快捷键 |
 | `ParamModel` | 参数分类（开关 / 档位 / 连续）、blob 检测、默认排除规则 |
 | `Randomizer` | 三类随机化语义 + 异步三值体检（`InertProbe`） |
-| `SnapshotBank` | 4 个快照 slot + 1D/2D 权重 + 按类插值 |
+| `SnapshotBank` | 4 个快照（每个覆盖整条链）+ 1D/2D 权重 + 按类插值 |
 | `MotionEngine` | 运动语义：角色发现、锚点交叉淡入、分层强度 |
 | `ContourIO` | 通过插件状态块改写包络轮廓（CK Envelope 格式） |
-| `ParamListView` | 参数列表 + 拖动涂抹勾选 + 筛选 |
-| `MorphPad` | 1D 滑条 / 2D 平面 morph 控件 |
-| `PluginScanner` | VST3 + VST2 扫描、插件表持久化、每插件的勾选记忆 |
+| `ChainRunner` / `OutputGuard` / `HistoryRing` | 串联、链尾安全网、随机化历史——抽出来是为了能无头测 |
+| `Theme` | **设计系统**：Bitwig Grid 取样的配色、字体（按点高）、圆角、端口 / 连线 / 图标的画法 |
+| `GridLookAndFeel` | 所有 JUCE 控件的 Grid 风格外观；按钮变体靠组件属性传（`ui::variant` 等） |
+| `ChainStrip` | 信号链：模块 + 跟着信号变色的连线，点击 / 双击 / 右键 / 旁通 |
+| `Widgets` | 分段选择器、步进器、快照方块 |
+| `ParamListView` | 参数列表：拖动涂抹勾选、筛选、按宽度取舍列 |
+| `MorphPad` | 1D（带权重曲线）/ 2D morph 控件 |
+| `PluginScanner` | VST3 + VST2 扫描、插件表持久化、勾选 / 幅度 / 功能标签的记忆 |
+| `PluginTagView` | 插件功能标签窗口 |
 | `HostedPluginWindow` | 子插件界面的浮动窗口 |
 | `Utf8.h` | `_u8` 字面量后缀。**中文字面量必须带它**，见下 |
+
+### 界面截图
+
+```bash
+cmake --build build --target pr_uisnap --config Release
+"./build/pr_uisnap_artefacts/Release/pr_uisnap.exe"      # → build/ui_snap/*.png
+```
+
+[Tests/UiSnapshot.cpp](Tests/UiSnapshot.cpp) 构造真的 processor + editor、装几个假插件，
+把界面画成 PNG（含最小窗口尺寸那一张）。改界面就靠它看效果。
 
 ### 无头验收测试
 

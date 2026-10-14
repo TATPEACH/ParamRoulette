@@ -85,6 +85,15 @@ public:
     void loadPlugin (const juce::PluginDescription& desc, LoadCallback onDone = {})
     { loadPluginIntoSlot (focused, desc, std::move (onDone)); }
 
+   #if PR_TEST_HOOKS
+    /** **只给 Tests/UiSnapshot.cpp 用。** 同步装一个现成的实例（假插件），
+        跳过格式管理器的异步加载——截图工具要的是确定性的画面，
+        不是"本机碰巧装了什么插件"。正式构建里这个函数不存在。 */
+    void installForTesting (int chainSlot, std::unique_ptr<juce::AudioPluginInstance> p,
+                            const juce::PluginDescription& d)
+    { installHosted (chainSlot, std::move (p), d); }
+   #endif
+
     void loadPluginById (const juce::String& identifier, LoadCallback onDone = {});
     void unloadPlugin() { unloadSlot (focused); }
 

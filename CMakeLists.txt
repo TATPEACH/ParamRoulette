@@ -122,6 +122,10 @@ set(PR_SOURCES
     Source/OutputGuard.cpp
     Source/PluginScanner.cpp
     Source/HostedPluginWindow.cpp
+    Source/Theme.cpp
+    Source/GridLookAndFeel.cpp
+    Source/Widgets.cpp
+    Source/ChainStrip.cpp
     Source/ParamListView.cpp
     Source/PluginTagView.cpp
     Source/MorphPad.cpp
@@ -142,6 +146,10 @@ set(PR_HEADERS
     Source/HostedSlot.h
     Source/PluginScanner.h
     Source/HostedPluginWindow.h
+    Source/Theme.h
+    Source/GridLookAndFeel.h
+    Source/Widgets.h
+    Source/ChainStrip.h
     Source/ParamListView.h
     Source/PluginTagView.h
     Source/MorphPad.h
@@ -252,6 +260,41 @@ target_compile_definitions(pr_probe PUBLIC
     JUCE_STANDALONE_APPLICATION=1)
 
 target_link_libraries(pr_probe
+    PRIVATE juce::juce_audio_utils
+    PUBLIC  juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags)
+
+# ---------------------------------------------------------------- 界面截图
+# 构造真的 processor + editor，装几个假插件，把整个界面画进 PNG。
+# 原生插件窗口只有在 DAW 里才看得到——没有这个工具，所有视觉改动都是盲改。
+#
+#   cmake --build build --target pr_uisnap --config Release
+#   build/pr_uisnap_artefacts/Release/pr_uisnap.exe        # → build/ui_snap/*.png
+#
+# 两个测试专用的宏，正式插件里都没有：
+#   PR_TEST_HOOKS             —— processor 多出一个同步装插件的 installForTesting()
+#   PR_SETTINGS_NAME_OVERRIDE —— 设置文件改名，免得析构时写坏用户真正的插件表
+juce_add_console_app(pr_uisnap PRODUCT_NAME "pr_uisnap")
+
+target_sources(pr_uisnap PRIVATE Tests/UiSnapshot.cpp ${PR_SOURCES})
+target_include_directories(pr_uisnap PUBLIC Source ${PR_VST2_SDK})
+
+target_compile_definitions(pr_uisnap PUBLIC
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_PLUGINHOST_VST=${PR_VST2_DEF}
+    JUCE_PLUGINHOST_AU=0
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_STRICT_REFCOUNTEDPOINTER=1
+    JUCE_MODAL_LOOPS_PERMITTED=1      # runDispatchLoopUntil 要它
+    JUCE_STANDALONE_APPLICATION=1
+    PR_TEST_HOOKS=1
+    "PR_SETTINGS_NAME_OVERRIDE=\"ParamRoulette-uisnap\""
+    # 插件 target 里这两个宏由 juce_add_plugin 提供；这里是普通程序，得自己给
+    "JucePlugin_Name=\"ParamRoulette\""
+    JucePlugin_IsSynth=0)
+
+target_link_libraries(pr_uisnap
     PRIVATE juce::juce_audio_utils
     PUBLIC  juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)

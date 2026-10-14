@@ -1,4 +1,5 @@
 #include "PluginTagView.h"
+#include "GridLookAndFeel.h"
 
 namespace pr
 {
@@ -6,18 +7,22 @@ namespace pr
 PluginTagView::PluginTagView (PluginScanner& s)
     : scanner (s)
 {
-    table.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff262626));
-    table.setRowHeight (22);
-    table.setHeaderHeight (24);
+    table.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
+    table.setRowHeight (30);
+    table.setHeaderHeight (28);
 
     auto& h = table.getHeader();
     h.addColumn ("插件"_u8,   colName,   300, 120, -1, juce::TableHeaderComponent::defaultFlags);
-    h.addColumn ("格式"_u8,   colFormat,  70,  50, -1, juce::TableHeaderComponent::defaultFlags);
-    h.addColumn ("功能标签"_u8, colTag,   160, 100, -1, juce::TableHeaderComponent::defaultFlags);
+    h.addColumn ("格式"_u8,   colFormat,  80,  60, -1, juce::TableHeaderComponent::defaultFlags);
+    h.addColumn ("功能标签"_u8, colTag,   190, 120, -1, juce::TableHeaderComponent::defaultFlags);
 
     addAndMakeVisible (table);
 
-    teFilter.setTextToShowWhenEmpty ("按名字筛选（空格分隔）"_u8, juce::Colour (0xff707070));
+    teFilter.getProperties().set ("prSearch", true);
+    teFilter.setIndents (32, 0);
+    teFilter.setJustification (juce::Justification::centredLeft);
+    teFilter.setFont (theme::font (12.5f));
+    teFilter.setTextToShowWhenEmpty ("按名字 / 厂牌筛选（空格分隔）"_u8, theme::textFaint);
     teFilter.onTextChange = [this] { rebuildRows(); };
     addAndMakeVisible (teFilter);
 
@@ -27,13 +32,15 @@ PluginTagView::PluginTagView (PluginScanner& s)
     tbUntaggedOnly.onClick = [this] { rebuildRows(); };
     addAndMakeVisible (tbUntaggedOnly);
 
+    ui::variant (bGuess, ui::Variant::primary);
+    ui::icon (bGuess, theme::Icon::tag);
     bGuess.setTooltip ("按插件名里的关键词猜一轮。只能盖住约三成，"_u8
-                       "而且**只填未分类的**，不会覆盖你手动标过的。"_u8);
+                       "而且只填未分类的，不会覆盖你手动标过的。"_u8);
     bGuess.onClick = [this] { guessAll(); };
     addAndMakeVisible (bGuess);
 
-    lCoverage.setFont (juce::FontOptions (12.0f));
-    lCoverage.setColour (juce::Label::textColourId, juce::Colour (0xff9a9a9a));
+    lCoverage.setFont (theme::font (11.5f));
+    lCoverage.setColour (juce::Label::textColourId, theme::textDim);
     lCoverage.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (lCoverage);
 
@@ -44,27 +51,32 @@ PluginTagView::~PluginTagView() = default;
 
 void PluginTagView::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colour (0xff1e1e1e));
+    g.fillAll (theme::canvas);
+    theme::fillDotGrid (g, getLocalBounds());
+
+    // 表格放在一张卡片里，和主界面一个语言。**不画投影**：表格是透明的，悬停一行
+    // 就会连带重画这里，DropShadow 每次都要把整张卡片模糊一遍，太贵。
+    theme::drawCard (g, table.getBounds().expanded (6).toFloat(), theme::rCard, theme::module, false);
 }
 
 void PluginTagView::resized()
 {
-    auto r = getLocalBounds().reduced (8);
+    auto r = getLocalBounds().reduced (theme::gap);
 
     {
-        auto row = r.removeFromTop (26);
-        bGuess.setBounds (row.removeFromRight (110));
-        row.removeFromRight (8);
-        tbUntaggedOnly.setBounds (row.removeFromRight (100));
-        row.removeFromRight (8);
+        auto row = r.removeFromTop (32);
+        bGuess.setBounds (row.removeFromRight (134));
+        row.removeFromRight (10);
+        tbUntaggedOnly.setBounds (row.removeFromRight (112));
+        row.removeFromRight (10);
         teFilter.setBounds (row);
     }
 
-    r.removeFromTop (4);
-    lCoverage.setBounds (r.removeFromBottom (18));
-    r.removeFromBottom (4);
+    r.removeFromTop (14);
+    lCoverage.setBounds (r.removeFromBottom (20));
+    r.removeFromBottom (12);
 
-    table.setBounds (r);
+    table.setBounds (r.reduced (6));
 }
 
 //==============================================================================
@@ -124,45 +136,87 @@ int PluginTagView::getNumRows()
 
 void PluginTagView::paintRowBackground (juce::Graphics& g, int row, int w, int h, bool selected)
 {
-    juce::ignoreUnused (w, h);
+    const auto r = juce::Rectangle<float> ((float) w, (float) h).reduced (2.0f, 1.0f);
 
     if (selected)
-        g.fillAll (juce::Colour (0xff3d6b7d));
+    {
+        g.setColour (theme::controlHi.withAlpha (0.55f));
+        g.fillRoundedRectangle (r, theme::rRow);
+    }
     else if (row % 2)
-        g.fillAll (juce::Colour (0xff2b2b2b));
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.02f));
+        g.fillRoundedRectangle (r, theme::rRow);
+    }
 }
 
 void PluginTagView::paintCell (juce::Graphics& g, int row, int columnId,
                                int w, int h, bool /*selected*/)
 {
+    using namespace theme;
+
     if (! juce::isPositiveAndBelow (row, rows.size()))
         return;
 
     const auto& d = rows.getReference (row);
-    const auto area = juce::Rectangle<int> (0, 0, w, h).reduced (6, 0);
-
-    g.setFont (juce::FontOptions (13.0f));
+    const auto area = juce::Rectangle<int> (0, 0, w, h).reduced (10, 0);
 
     switch (columnId)
     {
         case colName:
-            g.setColour (juce::Colours::white);
+            g.setFont (font (12.5f, Weight::medium));
+            g.setColour (text);
             g.drawText (d.name, area, juce::Justification::centredLeft, true);
             break;
 
         case colFormat:
-            g.setColour (juce::Colour (0xff8a8a8a));
-            g.drawText (d.pluginFormatName, area, juce::Justification::centredLeft, true);
+        {
+            g.setFont (font (10.5f, Weight::medium));
+            const float tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), d.pluginFormatName) + 14.0f;
+            const auto pill = area.toFloat().withSizeKeepingCentre (juce::jmin ((float) area.getWidth(), tw), 18.0f)
+                                            .withX ((float) area.getX());
+            g.setColour (well);
+            g.fillRoundedRectangle (pill, 9.0f);
+            g.setColour (textDim);
+            g.drawText (d.pluginFormatName, pill, juce::Justification::centred, false);
             break;
+        }
 
         case colTag:
         {
             const auto tag = scanner.loadTag (d.createIdentifierString());
+            const auto c   = tagColour (tag);
+            const auto label = fnTagLabel (tag);
 
-            // 未分类的画暗，标过的画亮 —— 扫一眼就知道还剩多少活
-            g.setColour (tag == FnTag::Unknown ? juce::Colour (0xff6a6a6a)
-                                               : juce::Colour (0xffc9a0dc));
-            g.drawText (fnTagLabel (tag), area, juce::Justification::centredLeft, true);
+            // 标签做成分类色的胶囊，和信号链上模块的颜色一一对应；
+            // 未分类的是虚线框——"这里还没填"，一眼就能扫出剩多少活。
+            g.setFont (font (11.5f, Weight::medium));
+            const float tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), label) + 34.0f;
+            const auto pill = area.toFloat().withSizeKeepingCentre (juce::jmin ((float) area.getWidth(), tw), 22.0f)
+                                            .withX ((float) area.getX());
+
+            if (tag == FnTag::Unknown)
+            {
+                juce::Path outline, dashed;
+                outline.addRoundedRectangle (pill.reduced (0.5f), 11.0f);
+                const float dashes[] = { 4.0f, 3.0f };
+                juce::PathStrokeType (1.0f).createDashedStroke (dashed, outline, dashes, 2);
+                g.setColour (strokeHi);
+                g.fillPath (dashed);
+                g.setColour (textFaint);
+            }
+            else
+            {
+                g.setColour (tint (c, 0.30f));
+                g.fillRoundedRectangle (pill, 11.0f);
+                g.setColour (c);
+                g.fillEllipse (pill.withWidth (22.0f).reduced (7.5f));
+                g.setColour (c.brighter (0.3f));
+            }
+
+            g.drawText (label, pill.withTrimmedLeft (18.0f).withTrimmedRight (6.0f), juce::Justification::centred, true);
+            drawIcon (g, Icon::chevronDown, juce::Rectangle<float> (pill.getRight() + 4.0f, pill.getCentreY() - 5.0f, 10.0f, 10.0f),
+                      textFaint, 1.4f);
             break;
         }
 

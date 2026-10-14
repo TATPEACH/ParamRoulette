@@ -1,28 +1,37 @@
 #pragma once
 
 #include "ParamModel.h"
+#include "Theme.h"
 
 namespace pr
 {
 
-/** 参数列表：拖动涂抹勾选 + 文本 filter + 批量按钮。
+/** 参数列表：拖动涂抹勾选 + 文本 filter + 批量操作。
 
     从 ReaScript 的 immediate-mode 搬到 retained-mode 反而更简单——
     ImGui 版每帧都要重算一遍可见行，这里只在 filter 变化时算一次。
 
-    **不持有数据**：model 和 checked 都是 processor 的引用。这样随机化/morph
-    改了值以后，界面只要 repaint 就是最新的，不需要来回拷。代价是这个组件
-    必须比 processor 先死——editor 本来就是这个生命周期，没问题。
+    **不持有数据**：model 和 checked 都指向 processor 里**当前聚焦链位**的那两份。
+    随机化 / morph 改了值以后，界面只要 repaint 就是最新的，不需要来回拷。
+
+    **为什么是指针而不是引用**（上一版的 bug）：以前构造时绑引用，绑的是当时聚焦的
+    `chain[0]`。切到别的链位后 processor 的 `getModel()` 已经指向新插件，列表却还在
+    画旧插件的参数——而随机化作用在新插件上，界面和声音对不上。现在 editor 每次
+    结构变化都调 `setSource()` 重新指一遍。
 */
 class ParamListView final : public juce::Component,
                             private juce::Timer
 {
 public:
-    ParamListView (juce::Array<ParamInfo>& modelRef, juce::Array<bool>& checkedRef);
+    ParamListView();
     ~ParamListView() override;
+
+    /** 指向要显示的那份模型和勾选表。换链位 / 换插件后必须重新调。 */
+    void setSource (juce::Array<ParamInfo>& model, juce::Array<bool>& checked);
 
     void resized() override;
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;     ///< 表头那个全选圆圈
 
     /** 结构变了（换插件 / 重建模型）：重算可见行，滚回顶部。 */
     void rebuild();
@@ -57,8 +66,9 @@ public:
     void applyToMatching (bool value);
     void uncheckInert();
 
-    int getNumVisible() const noexcept  { return visible.size(); }
-    int getNumChecked() const noexcept;
+    int  getNumVisible() const noexcept  { return visible.size(); }
+    int  getNumChecked() const noexcept;
+    bool hasFilterTerms() const noexcept { return ! terms.isEmpty(); }
 
     /** 勾选状态被用户改动时触发（拖动结束 / 批量按钮），用来落盘。 */
     std::function<void()> onChecksChanged;
@@ -71,6 +81,9 @@ public:
         codex 那张表里的几个数（0.01~0.10），一个菜单点起来还更快。 */
     std::function<void (int modelIndex, float span)> onSpanChanged;
 
+    static constexpr int kRowH    = 26;
+    static constexpr int kHeaderH = 28;
+
 private:
     //==============================================================================
     /** 内容组件。只负责把事件转回 owner——所有状态都在 owner 上，
@@ -82,13 +95,25 @@ private:
         void mouseDown (const juce::MouseEvent& e) override  { owner.rowsMouseDown (e); }
         void mouseDrag (const juce::MouseEvent& e) override  { owner.rowsMouseDrag (e); }
         void mouseUp   (const juce::MouseEvent& e) override  { owner.rowsMouseUp (e); }
+        void mouseMove (const juce::MouseEvent& e) override  { owner.rowsMouseMove (e); }
+        void mouseExit (const juce::MouseEvent& e) override  { owner.rowsMouseExit (e); }
         ParamListView& owner;
     };
+
+    /** 一行里各列的位置。表头、行绘制、点击判定共用这一个函数——
+        各算各的话，改一个列宽就会出现"看着点的是幅度、实际翻了勾选"。 */
+    struct Cols
+    {
+        juce::Rectangle<int> check, index, name, kind, was, value, span, note;
+    };
+    static Cols layoutCols (juce::Rectangle<int> row);
 
     void paintRows (juce::Graphics&);
     void rowsMouseDown (const juce::MouseEvent&);
     void rowsMouseDrag (const juce::MouseEvent&);
     void rowsMouseUp   (const juce::MouseEvent&);
+    void rowsMouseMove (const juce::MouseEvent&);
+    void rowsMouseExit (const juce::MouseEvent&);
 
     void timerCallback() override;      ///< 拖到边缘时自动滚动
 
@@ -97,15 +122,19 @@ private:
     bool matches (const ParamInfo&) const;
     int  rowAt (int yInRows) const noexcept;
     void paintRow (juce::Graphics&, int displayRow, juce::Rectangle<int> area);
-
-    /** 「幅度」列的横向范围（在 rows 坐标系里）。点击命中判定和绘制共用它，
-        免得两处各算一遍、改列宽时错位。 */
-    juce::Range<int> spanColumnX() const noexcept;
+    void paintHeader (juce::Graphics&, juce::Rectangle<int> area);
+    juce::Rectangle<int> headerCheckArea() const;
     void showSpanMenu (int modelIndex);
 
+    bool isChecked (int modelIndex) const noexcept
+    {
+        return checked != nullptr && juce::isPositiveAndBelow (modelIndex, checked->size())
+            && checked->getUnchecked (modelIndex);
+    }
+
     //==============================================================================
-    juce::Array<ParamInfo>& model;
-    juce::Array<bool>&      checked;
+    juce::Array<ParamInfo>* model   = nullptr;
+    juce::Array<bool>*      checked = nullptr;
 
     juce::Viewport viewport;
     Rows           rows { *this };
@@ -120,6 +149,8 @@ private:
     int  lastPaintedRow = -1;
     bool dirtyChecks = false;           ///< 这趟拖动确实改过东西吗
     int  dragYInViewport = 0;
+    int  hoverRow = -1;
+    bool hoverSpan = false;
 
     /** 鼠标按下后**真的移动过**了吗。
 
@@ -129,7 +160,6 @@ private:
         结果是：列表滚下去之后**单击一行会连带刷掉上面一整片**。 */
     bool hasDragged = false;
 
-    static constexpr int kRowH   = 22;
     static constexpr int kEdgePx = 14;  ///< 距上下边缘多近开始自动滚
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ParamListView)

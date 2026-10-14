@@ -84,7 +84,7 @@ void SnapshotBank::capture (int snapSlot, const SnapTarget* targets, int numTarg
 
     auto& cs = slots[(size_t) snapSlot];
     cs = ChainSnapshot {};
-    cs.name = name.isNotEmpty() ? name : ("Slot " + juce::String (snapSlot + 1));
+    cs.name = name.isNotEmpty() ? name : ("快照 "_u8 + juce::String (snapSlot + 1));
 
     for (int i = 0; i < juce::jmin (numTargets, kMaxChain); ++i)
         if (auto* p = targets[i].plugin)
@@ -478,7 +478,7 @@ void SnapshotBank::restoreFromValueTree (const juce::ValueTree& v)
         }
 
         if (cs.name.isEmpty())
-            cs.name = "Slot " + juce::String (i + 1);
+            cs.name = "快照 "_u8 + juce::String (i + 1);
     }
 }
 

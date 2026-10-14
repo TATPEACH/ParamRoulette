@@ -1,4 +1,5 @@
 #include "HostedPluginWindow.h"
+#include "Theme.h"
 
 namespace pr
 {
@@ -6,8 +7,7 @@ namespace pr
 HostedPluginWindow::HostedPluginWindow (juce::AudioPluginInstance& plugin,
                                         std::function<void()> onCloseRequested)
     : juce::DocumentWindow (plugin.getName(),
-                            juce::LookAndFeel::getDefaultLookAndFeel()
-                                .findColour (juce::ResizableWindow::backgroundColourId),
+                            theme::canvas,      // 子插件界面没铺满时露出来的底色，和主界面一致
                             juce::DocumentWindow::closeButton),
       onClose (std::move (onCloseRequested))
 {
