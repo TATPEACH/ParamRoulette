@@ -1,11 +1,12 @@
 #include "PluginTagView.h"
 #include "GridLookAndFeel.h"
+#include "HwTheme.h"
 
 namespace pr
 {
 
-PluginTagView::PluginTagView (PluginScanner& s)
-    : scanner (s)
+PluginTagView::PluginTagView (PluginScanner& s, Look l)
+    : scanner (s), look (l)
 {
     table.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
     table.setRowHeight (30);
@@ -44,13 +45,34 @@ PluginTagView::PluginTagView (PluginScanner& s)
     lCoverage.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (lCoverage);
 
+    setLook (look);
     rebuildRows();
 }
 
 PluginTagView::~PluginTagView() = default;
 
+void PluginTagView::setLook (Look l)
+{
+    look = l;
+
+    const bool hwLook = look == Look::hardware;
+    teFilter.setTextToShowWhenEmpty ("按名字 / 厂牌筛选（空格分隔）"_u8, hwLook ? hw::vfdDim : theme::textFaint);
+    lCoverage.setColour (juce::Label::textColourId, hwLook ? hw::legendDim : theme::textDim);
+    repaint();
+    table.repaint();
+}
+
 void PluginTagView::paint (juce::Graphics& g)
 {
+    if (look == Look::hardware)
+    {
+        // 藏青面板上压一块荧光屏，表格就显示在屏幕里
+        hw::drawFaceplate (g, getLocalBounds().toFloat());
+        const auto screen = table.getBounds().expanded (6).toFloat();
+        hw::drawRecess (g, screen, 5.0f, hw::glass);
+        return;
+    }
+
     g.fillAll (theme::canvas);
     theme::fillDotGrid (g, getLocalBounds());
 
@@ -138,6 +160,13 @@ void PluginTagView::paintRowBackground (juce::Graphics& g, int row, int w, int h
 {
     const auto r = juce::Rectangle<float> ((float) w, (float) h).reduced (2.0f, 1.0f);
 
+    if (look == Look::hardware)
+    {
+        if (selected)       { g.setColour (hw::vfd.withAlpha (0.12f)); g.fillRect (r); }
+        else if (row % 2)   { g.setColour (hw::vfd.withAlpha (0.03f)); g.fillRect (r); }
+        return;
+    }
+
     if (selected)
     {
         g.setColour (theme::controlHi.withAlpha (0.55f));
@@ -160,6 +189,12 @@ void PluginTagView::paintCell (juce::Graphics& g, int row, int columnId,
 
     const auto& d = rows.getReference (row);
     const auto area = juce::Rectangle<int> (0, 0, w, h).reduced (10, 0);
+
+    if (look == Look::hardware)
+    {
+        paintCellHardware (g, d, columnId, area);
+        return;
+    }
 
     switch (columnId)
     {
@@ -217,6 +252,68 @@ void PluginTagView::paintCell (juce::Graphics& g, int row, int columnId,
             g.drawText (label, pill.withTrimmedLeft (18.0f).withTrimmedRight (6.0f), juce::Justification::centred, true);
             drawIcon (g, Icon::chevronDown, juce::Rectangle<float> (pill.getRight() + 4.0f, pill.getCentreY() - 5.0f, 10.0f, 10.0f),
                       textFaint, 1.4f);
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+void PluginTagView::paintCellHardware (juce::Graphics& g, const juce::PluginDescription& d, int columnId,
+                                       juce::Rectangle<int> area)
+{
+    using namespace hw;
+
+    switch (columnId)
+    {
+        case colName:
+            g.setFont (font (12.5f, theme::Weight::medium));
+            g.setColour (vfd);
+            g.drawText (d.name, area, juce::Justification::centredLeft, true);
+            break;
+
+        case colFormat:
+            g.setFont (monoFont (11.5f));
+            g.setColour (vfdDim.brighter (0.3f));
+            g.drawText (d.pluginFormatName, area, juce::Justification::centredLeft, true);
+            break;
+
+        case colTag:
+        {
+            // 标签：功能色的细框 + 字，和机架上模块那条彩色胶带一一对应；未分类是一道虚线
+            const auto tag   = scanner.loadTag (d.createIdentifierString());
+            const auto c     = theme::tagColour (tag);
+            const auto label = fnTagLabel (tag);
+
+            g.setFont (font (11.5f, theme::Weight::medium));
+            const float tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), label) + 30.0f;
+            const auto box = area.toFloat().withSizeKeepingCentre (juce::jmin ((float) area.getWidth(), tw), 20.0f)
+                                            .withX ((float) area.getX());
+
+            if (tag == FnTag::Unknown)
+            {
+                juce::Path outline, dashed;
+                outline.addRectangle (box.reduced (0.5f));
+                const float dashes[] = { 3.0f, 3.0f };
+                juce::PathStrokeType (1.0f).createDashedStroke (dashed, outline, dashes, 2);
+                g.setColour (vfdDim);
+                g.fillPath (dashed);
+                g.setColour (vfdDim.brighter (0.3f));
+            }
+            else
+            {
+                g.setColour (c.withAlpha (0.16f));
+                g.fillRect (box);
+                g.setColour (c.withAlpha (0.8f));
+                g.drawRect (box, 1.0f);
+                g.fillRect (box.withWidth (5.0f).reduced (0.0f, 4.0f).translated (6.0f, 0.0f));
+                g.setColour (c.brighter (0.35f));
+            }
+
+            g.drawText (label, box.withTrimmedLeft (16.0f).withTrimmedRight (6.0f), juce::Justification::centred, true);
+            theme::drawIcon (g, theme::Icon::chevronDown, juce::Rectangle<float> (box.getRight() + 4.0f, box.getCentreY() - 5.0f, 10.0f, 10.0f),
+                             vfdDim, 1.4f);
             break;
         }
 

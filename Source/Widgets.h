@@ -37,7 +37,8 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     juce::String getTooltip() override;
 
-private:
+protected:
+    // 硬件版的「互锁按键组」是子类，只换 paint()。
     juce::Rectangle<float> segment (int i) const;
     int indexAt (juce::Point<float>) const;
 

@@ -322,6 +322,23 @@ void drawIcon (juce::Graphics& g, Icon icon, juce::Rectangle<float> r, juce::Col
             p.addRoundedRectangle (0.44f, 0.36f, 0.48f, 0.28f, 0.14f);
             break;
 
+        case Icon::knob:
+        {
+            // 旋钮 = 切换外观（Grid ↔ 硬件）。一圈刻度点 + 带指针的圆
+            p.addEllipse (0.26f, 0.26f, 0.48f, 0.48f);
+            p.startNewSubPath (0.5f, 0.5f); p.lineTo (0.66f, 0.34f);
+            strokeUnit (g, p, r, c, sw);
+
+            juce::Path ticks;
+            for (float deg : { -135.0f, -67.5f, 0.0f, 67.5f, 135.0f })
+            {
+                const auto pt = juce::Point<float> (0.5f, 0.5f).getPointOnCircumference (0.42f, juce::degreesToRadians (deg));
+                ticks.addEllipse (pt.x - 0.045f, pt.y - 0.045f, 0.09f, 0.09f);
+            }
+            fillUnit (g, ticks, r, c);
+            return;
+        }
+
         case Icon::none:
             return;
     }

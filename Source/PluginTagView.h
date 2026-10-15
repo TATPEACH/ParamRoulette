@@ -24,8 +24,15 @@ class PluginTagView final : public juce::Component,
                             private juce::TableListBoxModel
 {
 public:
-    explicit PluginTagView (PluginScanner&);
+    /** 两套皮肤各一种画法。行为一样，只是 Grid 版是深色点阵画布上的卡片，
+        硬件版是藏青面板上的一块荧光屏。 */
+    enum class Look { grid, hardware };
+
+    explicit PluginTagView (PluginScanner&, Look = Look::grid);
     ~PluginTagView() override;
+
+    /** 换皮肤时窗口不关，原地换画法。 */
+    void setLook (Look);
 
     void resized() override;
     void paint (juce::Graphics&) override;
@@ -39,6 +46,7 @@ private:
     void cellClicked (int row, int columnId, const juce::MouseEvent&) override;
 
     //==============================================================================
+    void paintCellHardware (juce::Graphics&, const juce::PluginDescription&, int columnId, juce::Rectangle<int> area);
     void rebuildRows();
     void updateCoverage();
     void showTagMenu (int row);
@@ -47,6 +55,7 @@ private:
     enum ColumnId { colName = 1, colFormat, colTag };
 
     PluginScanner& scanner;
+    Look look;
 
     juce::TableListBox table { "plugins", this };
 

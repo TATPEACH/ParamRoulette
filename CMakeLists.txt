@@ -130,6 +130,13 @@ set(PR_SOURCES
     Source/PluginTagView.cpp
     Source/MorphPad.cpp
     Source/PluginProcessor.cpp
+    Source/EditorBase.cpp
+    Source/GridEditor.cpp
+    Source/HwTheme.cpp
+    Source/HardwareLookAndFeel.cpp
+    Source/HwWidgets.cpp
+    Source/HwPanels.cpp
+    Source/HardwareEditor.cpp
     Source/PluginEditor.cpp)
 
 set(PR_HEADERS
@@ -154,6 +161,13 @@ set(PR_HEADERS
     Source/PluginTagView.h
     Source/MorphPad.h
     Source/PluginProcessor.h
+    Source/EditorBase.h
+    Source/GridEditor.h
+    Source/HwTheme.h
+    Source/HardwareLookAndFeel.h
+    Source/HwWidgets.h
+    Source/HwPanels.h
+    Source/HardwareEditor.h
     Source/PluginEditor.h)
 
 # ---------------------------------------------------------------- 两个 target

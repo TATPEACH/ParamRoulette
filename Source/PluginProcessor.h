@@ -92,6 +92,10 @@ public:
     void installForTesting (int chainSlot, std::unique_ptr<juce::AudioPluginInstance> p,
                             const juce::PluginDescription& d)
     { installHosted (chainSlot, std::move (p), d); }
+
+    /** 固定随机种子。截图工具靠它出**逐像素可复现**的图——改共享的界面组件之后，
+        拿新旧截图逐像素比，就能确认另一套皮肤一个像素都没变。 */
+    void seedForTesting (juce::int64 seed) { rng.setSeed (seed); }
    #endif
 
     void loadPluginById (const juce::String& identifier, LoadCallback onDone = {});
@@ -290,6 +294,13 @@ public:
         界面必须把它显示出来——否则用户只听到突然静音，完全不知道发生了什么。 */
     bool consumeSawNonFinite() noexcept { return outputGuard.consumeSawNonFinite(); }
 
+    /** 链尾输出电平，给硬件皮肤的 VU 表。**只在消息线程调**。
+
+        rms 是最近一块的（两个声道取大的），peak 是自上次调用以来的最大绝对值（读一次就清）。
+        音频停了（宿主旁通 / 停播放不再调 processBlock）时这两个数会卡在最后一块上，
+        所以连续 ~200ms 没有新块就当作静音报 0——不然指针会定在半空。 */
+    void getOutputLevel (float& rms, float& peak) noexcept;
+
     MorphMode getMorphMode() const noexcept
     {
         return pMorphMode->getIndex() == 1 ? MorphMode::TwoD : MorphMode::OneD;
@@ -398,6 +409,13 @@ private:
     std::atomic<bool> randomWasDown     { false };
     std::atomic<bool> latencyDirty      { false };
     std::atomic<bool> hostedValuesDirty { false };
+
+    // 输出电平表（音频线程写，消息线程读）。meterBlocks 每块 +1，用来判断"音频还在跑吗"。
+    std::atomic<float>    meterRms    { 0.0f };
+    std::atomic<float>    meterPeak   { 0.0f };
+    std::atomic<uint32_t> meterBlocks { 0 };
+    uint32_t meterLastSeen = 0;       ///< 只有消息线程碰
+    int      meterStale    = 0;
 
     int idxMorphX = -1, idxMorphY = -1, idxRandomize = -1, idxMorphMode = -1;
 

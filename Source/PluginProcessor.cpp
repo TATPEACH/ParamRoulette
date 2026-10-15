@@ -247,6 +247,40 @@ void ParamRouletteProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // 随机化一个全通的反馈量炸出 +40 dB 或 NaN 是完全现实的结果，
     // 而爆音伤耳朵、NaN 会顺着总线永久污染下游插件。
     outputGuard.process (buffer);
+
+    // 输出电平（给 VU 表）。量的是安全网**之后**的信号——就是用户真正听到的那一份。
+    {
+        float rms = 0.0f, pk = 0.0f;
+        for (int ch = 0; ch < juce::jmin (2, numOut); ++ch)
+        {
+            rms = juce::jmax (rms, buffer.getRMSLevel (ch, 0, numSamples));
+            pk  = juce::jmax (pk,  buffer.getMagnitude (ch, 0, numSamples));
+        }
+
+        meterRms.store (rms, std::memory_order_relaxed);
+        if (pk > meterPeak.load (std::memory_order_relaxed))
+            meterPeak.store (pk, std::memory_order_relaxed);
+        meterBlocks.fetch_add (1, std::memory_order_relaxed);
+    }
+}
+
+void ParamRouletteProcessor::getOutputLevel (float& rms, float& peak) noexcept
+{
+    const auto blocks = meterBlocks.load (std::memory_order_relaxed);
+
+    if (blocks != meterLastSeen)
+    {
+        meterLastSeen = blocks;
+        meterStale = 0;
+    }
+    else if (++meterStale > 12)     // 界面 60Hz，≈200ms 没有新块（8192 采样的缓冲也够）
+    {
+        rms = peak = 0.0f;
+        return;
+    }
+
+    rms  = meterRms.load (std::memory_order_relaxed);
+    peak = meterPeak.exchange (0.0f, std::memory_order_relaxed);
 }
 
 double ParamRouletteProcessor::getTailLengthSeconds() const

@@ -20,7 +20,7 @@ namespace pr
     位置本身不存在这里，存在 processor 的 `Morph X` / `Morph Y` 参数上
     （那才是能被 DAW 自动化的东西）。这个组件只是它的一个视图。
 */
-class MorphPad final : public juce::Component
+class MorphPad : public juce::Component
 {
 public:
     explicit MorphPad (const SnapshotBank& bankRef);
@@ -49,7 +49,8 @@ public:
     std::function<void (float x, float y)> onPositionChanged;
     std::function<void()>                  onDragEnd;      ///< endChangeGesture
 
-private:
+protected:
+    // 子类（硬件版的示波器）只换 paint()，坐标换算 / 拖动 / 双击回中都用这里的。
     juce::Rectangle<float> padArea() const;
     void  positionFromMouse (const juce::MouseEvent&);
     void  paintOneD (juce::Graphics&, juce::Rectangle<float>);

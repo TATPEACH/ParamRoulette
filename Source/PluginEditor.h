@@ -1,216 +1,75 @@
 #pragma once
 
-#include "PluginProcessor.h"
-#include "ParamListView.h"
-#include "PluginTagView.h"
-#include "MorphPad.h"
+#include "EditorBase.h"
 #include "HostedPluginWindow.h"
 #include "GridLookAndFeel.h"
-#include "Widgets.h"
-#include "ChainStrip.h"
+#include "HardwareLookAndFeel.h"
 
 namespace pr
 {
 
-/** 主界面。
+/** editor 外壳——DAW 拿到的就是它。
 
-    **视觉上照着 Bitwig 的 The Grid 来**：深色点阵画布上摆几块圆角模块，
-    每块模块标题用分类色；信号链画成用连线串起来的模块。布局（1240×780 起）：
+    自己几乎不画东西，只做这几件事：
+      1. 持有**当前皮肤**（`GridEditor` 或 `HardwareEditor`），换皮肤时整个删掉重建
+      2. 持有子插件的浮动窗口（每链位一个）和两个工具窗口（扫描 / 标签）。
+         它们归外壳而不归皮肤：换外观时不会被关掉——扫描可能正跑到一半
+      3. 持有两套 LookAndFeel，和 editor 同寿
+      4. 记住用户选的皮肤：存进一个小文件，下次打开插件（包括别的实例）还是这一套
 
-        ┌ 顶栏：品牌 · 当前链位的插件 / preset / 界面 / 卸载 · 扫描 / 标签 ───────────┐
-        ├ 信号链：IN → 1…6 → 输出保护 → OUT ────────────────────────────── 存链 读链 ┤
-        ├ 随机化 ┐ ┌ 参数 ─────────────────────────────────────┐ ┌ 快照 · Morph ┐
-        │ 运动语义│ │                                             │ │  方块 + pad  │
-        ├ 状态栏 ──────────────────────────────────────────────── 快捷键提示 ┤
-
-    **它自己不持有任何状态**——模型 / 勾选 / 快照 / filter 文本全在 processor 上。
-    界面关掉再打开、或者在别的 DAW 窗口里重开，看到的还是同一份东西。
-
-    刷新分两档，别混：
-      - `getStructureGeneration()` 变了 = 换插件 / 换链位 / 重建模型 / 恢复工程 → `rebuildAll()`
-      - 只是值动了（子插件被拖、morph 在推）→ `refreshModelValues()` + `list.refresh()`
-
-    processor 的定时器**只管 morph**，不刷显示值。所以这边必须自己轮询
-    `consumeHostedValuesDirty()`，否则子插件界面上的改动在列表里看不到。
-*/
+    为什么不让 DAW 重新打开 editor 来换皮肤：插件没有办法要求宿主重建 editor。
+    所以 editor 本身是个不变的壳，皮肤是它里面可以换的一层。 */
 class ParamRouletteEditor final : public juce::AudioProcessorEditor,
-                                  private juce::ChangeListener,
-                                  private juce::Timer
+                                  private EditorHost
 {
 public:
     explicit ParamRouletteEditor (ParamRouletteProcessor&);
     ~ParamRouletteEditor() override;
 
-    void paint (juce::Graphics&) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
-    void mouseDown (const juce::MouseEvent&) override;
+
+    /** 立即换皮肤（同步）。窗口尺寸保持不变（会夹进新皮肤的尺寸范围）。 */
+    void setSkin (Skin);
+    Skin getSkin() const noexcept { return skin; }
+
+    /** 两套皮肤的默认尺寸 / 最小尺寸。硬件皮肤的旋钮和表头比 Grid 的控件占地方，
+        最小尺寸大一点（1160×760）——再小旋钮就得缩到看不清，那就违背拟物的初衷了。 */
+    static juce::Point<int> defaultSize (Skin);
+    static juce::Point<int> minimumSize (Skin);
 
 private:
-    //==============================================================================
-    /** 背景层：画布点阵、顶栏 / 状态栏、卡片和卡片标题。
+    //== EditorHost ================================================================
+    void openHostedWindow (int chainSlot) override;
+    void closeHostedWindows (int chainSlot) override;
+    bool isHostedWindowOpen (int chainSlot) const override;
+    void showScanWindow() override;
+    void showTagWindow() override;
+    void requestSkin (Skin) override;
+    juce::LookAndFeel_V4& lookAndFeelFor (Skin) override;
 
-        单独做成一个组件并 `setBufferedToImage (true)`：卡片的投影是模糊运算，
-        而界面每 50ms 会刷一次文字——不缓存的话每次刷新都要把背后的投影重算一遍。
-        这一层只在窗口尺寸变化时才真的重画。 */
-    class Backdrop final : public juce::Component
-    {
-    public:
-        struct Card
-        {
-            juce::Rectangle<int> bounds;
-            juce::String         title;
-            juce::Colour         colour;
-        };
+    void createView (Skin);
+    void applySizeLimits (Skin);
 
-        Backdrop() { setInterceptsMouseClicks (false, false); setBufferedToImage (true); }
+    /** 皮肤偏好单独存一个小文件（和插件设置文件放一起），不放进共享的设置文件：
+        同一个进程里每个插件实例都各自持有一份设置文件的内存副本，实例 B 存别的东西时
+        会把它那份过时的"皮肤 = grid"一起写回去，把实例 A 刚换的皮肤冲掉。 */
+    juce::File skinFile() const;
+    Skin loadSkinPreference() const;
+    void saveSkinPreference (Skin);
 
-        void setLayout (juce::Rectangle<int> header, juce::Rectangle<int> status,
-                        juce::Rectangle<int> chainLabel, std::vector<Card> cards);
-        void paint (juce::Graphics&) override;
-
-    private:
-        juce::Rectangle<int> header, status, chainLabel;
-        std::vector<Card>    cards;
-    };
-
-    //==============================================================================
-    void changeListenerCallback (juce::ChangeBroadcaster*) override;
-    void timerCallback() override;
-
-    void rebuildAll();
-    void updateStatus();
-    void refreshSnapshotTiles();
-    void refreshChainUI();
-    void refreshHistoryUI();
-    void syncFromParameters();
-    void syncMotionUI();
-    void rebuildPresetList();
-    juce::String buildStatusText();
-
-    /** 状态栏上那句"刚刚发生了什么"。新消息会高亮几秒再淡回普通颜色。 */
-    void setNote (const juce::String&);
-
-    void showPluginMenu (int chainSlot, juce::Component* anchor);
-    void showModuleMenu (int chainSlot);
-    void showScanWindow();
-    void closeScanWindow();
-
-    /** 插件功能标签窗口。它是"随机效果器链"的数据录入口，见 PluginTagView。 */
-    void showTagWindow();
-    void closeTagWindow();
-
-    void loadDescription (int chainSlot, const juce::PluginDescription&);
-    void toggleHostedWindow();
-    void openHostedWindow (int chainSlot);
-
-    /** 关掉某一位的浮动窗口；-1 = 全关。processor 换插件前会调它。 */
-    void closeHostedWindows (int chainSlot);
-    void doUnload (int chainSlot);
-
-    void doRoll();
-    void doHistory (bool back);
-
-    void applyFilter();
-    void confirmProbe();
-    void startProbe();
-    void offerUncheckInert (int numInert);
-    void showListMenu();
-
-    void pushMotionSettings();
-    void promptSaveChainPreset();
-    void showChainPresetMenu();
-
-    void wireKnob (juce::Slider&, juce::AudioParameterFloat&, const juce::String& label, juce::Colour);
-    void wireRange();
-
-    //==============================================================================
     ParamRouletteProcessor& proc;
 
-    // 第一个成员：这样它比所有子组件晚析构。dtor 里还会再 setLookAndFeel(nullptr) 一道保险。
-    GridLookAndFeel lnf;
+    // 两套 LookAndFeel 声明在所有组件**前面** = 最后析构：工具窗口、对话框、皮肤都挂在
+    // 它们上面，LookAndFeel 先死的话那些组件手里就是悬空引用。
+    GridLookAndFeel     gridLnf;
+    HardwareLookAndFeel hwLnf;
 
-    /** 没有这个实例的话 `setTooltip` 是死代码——JUCE 靠一个 TooltipWindow
-        去轮询鼠标底下的组件并画气泡，光设文字不会有任何显示。 */
-    RoundTooltipWindow tooltips { this, 650 };
-
-    Backdrop backdrop;
-
-    //== 顶栏 ======================================================================
-    /** 显示当前链位的插件名，点开是插件菜单。取代上一版的「选择插件…」——
-        名字本身就是按钮，既告诉你现在是谁、又是换插件的入口。 */
-    juce::TextButton bPlugin;
-    juce::ComboBox   cbPreset;
-    juce::TextButton bUI     { "界面"_u8 };
-    juce::TextButton bUnload { "卸载"_u8 };
-    juce::TextButton bScan   { "扫描"_u8 };
-    juce::TextButton bTags   { "标签"_u8 };
-
-    //== 信号链 ====================================================================
-    ChainStrip       chain;
-    juce::TextButton bChainSave { "存链"_u8 };
-    juce::TextButton bChainLoad { "读链"_u8 };
-
-    //== 随机化 ====================================================================
-    juce::Slider     kAmount;
-    juce::Slider     sRange;            ///< 双滑块：下限 / 上限
-    Stepper          stepMax;           ///< 每次只动 N 个
-    juce::TextButton bProbe { "体检"_u8 };
-    juce::TextButton bRoll;
-    juce::TextButton bHistBack, bHistFwd;
-    juce::Label      lHistory;
-    juce::Label      lResult;
-
-    //== 运动语义 ==================================================================
-    juce::ToggleButton tbMotion;
-    SegmentedControl   segSemantic;
-    juce::Label        lSemantic;
-    juce::Slider       kMotion, kTone;
-    juce::TextButton   bLockBase    { "设为基座"_u8 };
-    juce::TextButton   bRestoreBase { "还原基座"_u8 };
-    juce::Label        lBase;
-    juce::Label        lProfile;
-
-    //== 参数 ======================================================================
-    juce::Label      lCount;
-    juce::TextEditor teFilter;
-    juce::TextButton bOnlyMatching { "仅匹配"_u8 };
-    SegmentedControl segView;           ///< 全部 / 仅勾选 / 仅改动
-    juce::TextButton bCheckMatch   { "勾选匹配"_u8 };
-    juce::TextButton bUncheckMatch { "取消匹配"_u8 };
-    juce::TextButton bListMenu;
-    ParamListView    list;
-
-    //== 快照 / morph ==============================================================
-    SegmentedControl segMorphMode;      ///< 1D / 2D
-    SnapshotTiles    tiles;
-    MorphPad         pad;
-
-    //== 状态栏 ====================================================================
-    juce::Label lStatus;
-    juce::Label lHints;
-
-    //==============================================================================
     std::array<std::unique_ptr<HostedPluginWindow>, kMaxChain> hostedWindows;
     std::unique_ptr<juce::DocumentWindow> scanWindow;
     std::unique_ptr<juce::DocumentWindow> tagWindow;
-
-    int          lastGeneration = -1;
-    bool         syncing = false;   ///< 参数 → 界面回写中，别再反向推回去
-    juce::String note;              ///< 最近一次动作的说明（加载失败 / 体检结论 / 存了哪个快照）
-    juce::uint32 noteTime = 0;      ///< note 写入的时刻，用来做"新消息高亮几秒"
-
-    /** NaN 警告的显示截止时间（毫秒计数）。
-        latch 是读一次就清的，所以必须自己把它撑住几秒——否则那行字会在
-        20 Hz 的刷新里闪一帧就没了，用户根本来不及看见。 */
-    juce::uint32 guardWarnUntil = 0;
-
-    static constexpr int kHeaderH = 52;
-    static constexpr int kChainH  = 124;
-    static constexpr int kStatusH = 30;
-    static constexpr int kLeftW   = 304;
-    static constexpr int kRightW  = 276;
-    static constexpr int kRandomH = 222;
+    std::unique_ptr<EditorBase> view;
+    Skin skin = Skin::grid;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ParamRouletteEditor)
 };

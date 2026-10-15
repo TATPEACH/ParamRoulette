@@ -19,7 +19,7 @@ namespace pr
     画旧插件的参数——而随机化作用在新插件上，界面和声音对不上。现在 editor 每次
     结构变化都调 `setSource()` 重新指一遍。
 */
-class ParamListView final : public juce::Component,
+class ParamListView : public juce::Component,
                             private juce::Timer
 {
 public:
@@ -84,7 +84,9 @@ public:
     static constexpr int kRowH    = 26;
     static constexpr int kHeaderH = 28;
 
-private:
+protected:
+    // 皮肤可以换掉的只有**画法**（硬件版的荧光屏就是子类）：交互、筛选、涂抹勾选
+    // 全在这一个类里，两套皮肤用的是同一份逻辑。
     //==============================================================================
     /** 内容组件。只负责把事件转回 owner——所有状态都在 owner 上，
         免得两个类各存一半。 */
@@ -121,8 +123,8 @@ private:
     void updateContentSize();
     bool matches (const ParamInfo&) const;
     int  rowAt (int yInRows) const noexcept;
-    void paintRow (juce::Graphics&, int displayRow, juce::Rectangle<int> area);
-    void paintHeader (juce::Graphics&, juce::Rectangle<int> area);
+    virtual void paintRow (juce::Graphics&, int displayRow, juce::Rectangle<int> area);
+    virtual void paintHeader (juce::Graphics&, juce::Rectangle<int> area);
     juce::Rectangle<int> headerCheckArea() const;
     void showSpanMenu (int modelIndex);
 

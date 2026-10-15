@@ -114,7 +114,8 @@ namespace theme
     enum class Icon
     {
         none, dice, prev, next, power, plus, close, window, eject, search, scan, tag,
-        save, open, probe, pin, restore, more, check, chevronDown, chevronRight, warning, link
+        save, open, probe, pin, restore, more, check, chevronDown, chevronRight, warning, link,
+        knob    ///< 切换外观（Grid ↔ 硬件）
     };
 
     void drawIcon (juce::Graphics&, Icon, juce::Rectangle<float>, juce::Colour, float strokeWidth = 1.6f);

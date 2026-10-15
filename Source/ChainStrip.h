@@ -74,10 +74,12 @@ public:
     void mouseDoubleClick (const juce::MouseEvent&) override;
     juce::String getTooltip() override;
 
-private:
+protected:
+    // 硬件版（HwChainRack）是子类：它换掉 resized() / paint() 和开关键的位置，
+    // 点击判定、悬停、提示文字都用这里的。
     enum class Part { none, body, power, guardBody, guardPower };
 
-    juce::Rectangle<float> powerRect (juce::Rectangle<float> module) const;
+    virtual juce::Rectangle<float> powerRect (juce::Rectangle<float> module) const;
     std::pair<int, Part>   hitTest (juce::Point<float>) const;
 
     void paintModule (juce::Graphics&, int i);

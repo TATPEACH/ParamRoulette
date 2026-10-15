@@ -12,12 +12,19 @@
 // 所以不会碰你真正的插件表 / 勾选记忆 / 标签。
 //
 //   pr_uisnap.exe [输出目录]          默认 build/ui_snap
+//
+// 两套皮肤各出一组：01~05 是 Grid，hw_01~hw_05 是硬件拟物风。
+// Grid 那几张改共享代码前后要**逐像素一致**（种子固定），拿来确认改一套皮肤没有碰到另一套。
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "GridLookAndFeel.h"
+#include "HardwareLookAndFeel.h"
+#include "HardwareEditor.h"
+#include "PluginTagView.h"
 
 #include <iostream>
 
@@ -307,9 +314,12 @@ int main (int argc, char** argv)
                                  : File::getCurrentWorkingDirectory().getChildFile ("build/ui_snap");
     outDir.createDirectory();
 
-    // 确定性：每次从空的截图专用设置文件开始
-    File::getSpecialLocation (File::userApplicationDataDirectory)
-        .getChildFile ("ParamRoulette").getChildFile ("ParamRoulette-uisnap.settings").deleteFile();
+    // 确定性：每次从空的截图专用设置文件开始（皮肤偏好也是）
+    {
+        const auto dir = File::getSpecialLocation (File::userApplicationDataDirectory).getChildFile ("ParamRoulette");
+        dir.getChildFile ("ParamRoulette-uisnap.settings").deleteFile();
+        dir.getChildFile ("ParamRoulette-uisnap.skin").deleteFile();
+    }
 
     line ("ParamRoulette UI snapshot");
     line ("output: " + outDir.getFullPathName());
@@ -322,14 +332,23 @@ int main (int argc, char** argv)
                                           : String ("no")));
     }
 
-    struct Scenario { const char* file; bool populated; bool motion; bool twoD; bool minSize; const char* filter; };
+    // roundTrip：同一个界面先换到另一套皮肤、再换回来，然后才截图。
+    // 它必须和直接打开的那张**逐像素一样**——换皮肤不能留下任何残渣。
+    struct Scenario { const char* file; bool populated; bool motion; bool twoD; bool minSize; const char* filter; pr::Skin skin;
+                      bool roundTrip = false; };
 
     const Scenario scenarios[] =
     {
-        { "01_main",   true,  false, false, false, "" },
-        { "02_motion", true,  true,  true,  false, "eg" },
-        { "03_empty",  false, false, false, false, "" },
-        { "04_min",    true,  false, false, true,  "" },
+        { "01_main",      true,  false, false, false, "",   pr::Skin::grid },
+        { "02_motion",    true,  true,  true,  false, "eg", pr::Skin::grid },
+        { "03_empty",     false, false, false, false, "",   pr::Skin::grid },
+        { "04_min",       true,  false, false, true,  "",   pr::Skin::grid },
+        { "hw_01_main",   true,  false, false, false, "",   pr::Skin::hardware },
+        { "hw_02_motion", true,  true,  true,  false, "eg", pr::Skin::hardware },
+        { "hw_03_empty",  false, false, false, false, "",   pr::Skin::hardware },
+        { "hw_04_min",    true,  false, false, true,  "",   pr::Skin::hardware },
+        { "06_roundtrip_grid", true, false, false, false, "", pr::Skin::grid,     true },
+        { "06_roundtrip_hw",   true, false, false, false, "", pr::Skin::hardware, true },
     };
 
     for (const auto& sc : scenarios)
@@ -339,6 +358,7 @@ int main (int argc, char** argv)
 
         Rig rig;
         rig.proc = std::make_unique<pr::ParamRouletteProcessor>();
+        rig.proc->seedForTesting (20261015);     // 固定种子：同一份代码出的图逐像素一致
         rig.proc->setPlayConfigDetails (2, 2, 48000.0, 512);
         rig.proc->prepareToPlay (48000.0, 512);
 
@@ -353,10 +373,33 @@ int main (int argc, char** argv)
 
         rig.editor.reset (rig.proc->createEditorIfNeeded());
 
-        if (rig.editor == nullptr)
+        auto* shell = dynamic_cast<pr::ParamRouletteEditor*> (rig.editor.get());
+
+        if (shell == nullptr)
         {
             line ("  FAILED: no editor");
             return 1;
+        }
+
+        // 皮肤偏好是进程级的（换了一次之后新开的界面也是那一套），所以每张都显式指定，
+        // 尺寸也按那套皮肤的默认值来——和用户第一次在那套皮肤下打开插件时一样。
+        shell->setSkin (sc.skin);
+        {
+            const auto sz = pr::ParamRouletteEditor::defaultSize (sc.skin);
+            shell->setSize (sz.x, sz.y);
+        }
+
+        if (sc.roundTrip)
+        {
+            const auto other = sc.skin == pr::Skin::grid ? pr::Skin::hardware : pr::Skin::grid;
+            pump (150);
+            shell->setSkin (other);
+            pump (150);
+            shell->setSkin (sc.skin);
+
+            // 换到最小尺寸更大的皮肤时窗口会被夹大；换回来以后按这套皮肤的默认尺寸重设
+            const auto sz = pr::ParamRouletteEditor::defaultSize (sc.skin);
+            shell->setSize (sz.x, sz.y);
         }
 
         if (sc.minSize)
@@ -366,14 +409,23 @@ int main (int argc, char** argv)
         // 让 20Hz 定时器、ChangeBroadcaster 的异步回调都跑几轮
         pump (450);
 
+        // 截图里没有音频在跑，VU 指针会停在左端。摆到一个典型读数上（−3 VU），看得出表盘长什么样
+        for (auto* c : shell->getChildren())
+            if (auto* hwEd = dynamic_cast<pr::HardwareEditor*> (c))
+                hwEd->setVuForTesting (sc.populated ? -3.0f : -20.0f);
+
         render (*rig.editor, outDir.getChildFile (String (sc.file) + ".png"), 1.0f);
     }
 
-    line();
-    line ("== 05_tags");
+    for (const bool hwLook : { false, true })
     {
+        const String file = hwLook ? "hw_05_tags" : "05_tags";
+        line();
+        line ("== " + file);
+
         // 插件标签窗口单独画一张：塞一串假的已扫描插件，一部分预先打好标签
-        pr::GridLookAndFeel lf;
+        pr::GridLookAndFeel     gridLf;
+        pr::HardwareLookAndFeel hwLf;
         pr::PluginScanner sc;
 
         const char* names[] = { "Disperser", "FabFilter Pro-Q 4", "ACDD", "ACEH", "Valhalla VintageVerb",
@@ -393,8 +445,8 @@ int main (int argc, char** argv)
                 sc.saveTag (d.createIdentifierString(), t);
         }
 
-        pr::PluginTagView view (sc);
-        view.setLookAndFeel (&lf);
+        pr::PluginTagView view (sc, hwLook ? pr::PluginTagView::Look::hardware : pr::PluginTagView::Look::grid);
+        view.setLookAndFeel (hwLook ? static_cast<LookAndFeel*> (&hwLf) : &gridLf);
         view.setSize (660, 560);
 
         // 「只看未分类」默认是开的，截图要看到彩色标签就把它关掉
@@ -403,8 +455,34 @@ int main (int argc, char** argv)
                 tb->setToggleState (false, sendNotificationSync);
 
         pump (200);
-        render (view, outDir.getChildFile ("05_tags.png"), 1.0f);
+        render (view, outDir.getChildFile (file + ".png"), 1.0f);
         view.setLookAndFeel (nullptr);
+    }
+
+    // 换皮肤往返：和直接打开的那张必须逐像素一致
+    {
+        line();
+        line ("== round trip");
+
+        auto same = [&] (const char* a, const char* b)
+        {
+            const auto ia = ImageFileFormat::loadFrom (outDir.getChildFile (String (a) + ".png"));
+            const auto ib = ImageFileFormat::loadFrom (outDir.getChildFile (String (b) + ".png"));
+
+            bool eq = ia.isValid() && ib.isValid() && ia.getBounds() == ib.getBounds();
+            for (int y = 0; eq && y < ia.getHeight(); ++y)
+                for (int x = 0; eq && x < ia.getWidth(); ++x)
+                    eq = ia.getPixelAt (x, y) == ib.getPixelAt (x, y);
+
+            line (String ("  ") + (eq ? "ok    " : "FAIL  ") + b + (eq ? " == " : " != ") + a);
+            return eq;
+        };
+
+        const bool ok1 = same ("01_main",    "06_roundtrip_grid");
+        const bool ok2 = same ("hw_01_main", "06_roundtrip_hw");
+
+        if (! (ok1 && ok2))
+            return 2;
     }
 
     line();
