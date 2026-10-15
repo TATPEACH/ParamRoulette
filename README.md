@@ -1,12 +1,14 @@
 # ParamRoulette
 
-一个 **VST 宿主插件**：自己加载另一个插件，然后随机化那个插件的参数。
+一个 **VST 宿主插件**：自己加载**最多 6 个插件串成一条链**，然后随机化它们的参数。
 
 除了逐参数随机化，还有两件普通随机化器做不到的事：
 
-- **快照插值（morph）** —— 存 4 个喜欢的状态，用 1D 滑条或 2D 平面在它们之间连续过渡
+- **快照插值（morph）** —— 存 4 个喜欢的状态（每个覆盖整条链），用 1D 滑条或 2D 平面在它们之间连续过渡
 - **运动语义** —— 按「上扬 / 下降 / 先扬后抑」这种音乐意图生成变体，
   而不是逐参数掷骰子。包括改写插件的**包络轮廓**（对能认出格式的插件）
+
+界面照着 Bitwig 的 The Grid 做：深色画布上的圆角模块、分类色标题、用连线串起来的信号链。
 
 前身是一个只能在 REAPER 里跑的 ReaScript；这个版本是 JUCE 写的宿主插件，任何 DAW 都能用。
 
@@ -54,6 +56,24 @@ build32/ParamRouletteSynth_artefacts/Release/VST3/ParamRoulette Synth x86.vst3
 
 每个 target 还会出一个同名 Standalone `.exe`——**不用装、不经过桥、双击就开**，
 验证想法最快的路子。
+
+### 装进 REAPER（本机）
+
+**编译不会自动更新 REAPER 用的那一份。** REAPER 加载的是 VST3 目录里的副本，
+和 `build*/` 下的产物是两份文件——忘了这一步，代码改了、REAPER 里还是旧界面，
+而且从界面上看不出来。
+
+```bash
+node Tools/install_plugins.mjs              # 更新本机已经装过的副本
+node Tools/install_plugins.mjs --add fx-x64 # 顺带新装一个（synth-x86 / fx-x86 / synth-x64 / fx-x64）
+```
+
+它会：找 REAPER 配置的插件路径 + 标准 VST3 目录里已装的副本 → 拒绝安装比源码旧的产物 →
+DLL 被占用（REAPER 开着）就在动文件前停下 → 把旧版本备份到
+`%LOCALAPPDATA%\ParamRoulette\backup\`（留最近 5 次）→ 覆盖 → 逐文件校验 SHA-256。
+装完**重启 REAPER** 才会加载新的 DLL。
+
+想回滚：把备份目录里那个 `.vst3` 文件夹拷回 `C:\Program Files\Common Files\VST3\`。
 
 ### 为什么是两套独立插件
 
