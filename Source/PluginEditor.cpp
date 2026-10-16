@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 #include "GridEditor.h"
 #include "HardwareEditor.h"
+#include "RackEditor.h"
 #include "PluginTagView.h"
 
 namespace pr
@@ -54,8 +55,17 @@ namespace
         std::function<void()> onClose;
     };
 
-    juce::Colour toolBackground (Skin s)          { return s == Skin::hardware ? hw::panel : theme::canvas; }
-    PluginTagView::Look tagLook (Skin s)          { return s == Skin::hardware ? PluginTagView::Look::hardware : PluginTagView::Look::grid; }
+    juce::Colour toolBackground (Skin s)
+    {
+        return s == Skin::hardware ? hw::panel : s == Skin::rack ? rk::uiBg : theme::canvas;
+    }
+
+    PluginTagView::Look tagLook (Skin s)
+    {
+        return s == Skin::hardware ? PluginTagView::Look::hardware
+             : s == Skin::rack     ? PluginTagView::Look::rack
+                                   : PluginTagView::Look::grid;
+    }
 }
 
 //==============================================================================
@@ -97,14 +107,14 @@ ParamRouletteEditor::~ParamRouletteEditor()
 
 juce::Point<int> ParamRouletteEditor::defaultSize (Skin s)
 {
-    return s == Skin::hardware ? juce::Point<int> { 1280, 820 }
-                               : juce::Point<int> { 1240, 780 };
+    return s == Skin::grid ? juce::Point<int> { 1240, 780 }
+                           : juce::Point<int> { 1280, 820 };
 }
 
 juce::Point<int> ParamRouletteEditor::minimumSize (Skin s)
 {
-    return s == Skin::hardware ? juce::Point<int> { 1160, 760 }
-                               : juce::Point<int> { 1100, 700 };
+    return s == Skin::grid ? juce::Point<int> { 1100, 700 }
+                           : juce::Point<int> { 1160, 760 };
 }
 
 void ParamRouletteEditor::applySizeLimits (Skin s)
@@ -116,8 +126,12 @@ void ParamRouletteEditor::applySizeLimits (Skin s)
 
 juce::LookAndFeel_V4& ParamRouletteEditor::lookAndFeelFor (Skin s)
 {
-    if (s == Skin::hardware)
-        return hwLnf;
+    switch (s)
+    {
+        case Skin::hardware: return hwLnf;
+        case Skin::rack:     return rackLnf;
+        case Skin::grid:     break;
+    }
 
     return gridLnf;
 }
@@ -129,10 +143,12 @@ void ParamRouletteEditor::createView (Skin s)
 
     EditorHost& self = *this;     // 私有继承：转换只能在这里做，make_unique 里面做不了
 
-    if (s == Skin::hardware)
-        view = std::make_unique<HardwareEditor> (proc, self);
-    else
-        view = std::make_unique<GridEditor> (proc, self);
+    switch (s)
+    {
+        case Skin::hardware: view = std::make_unique<HardwareEditor> (proc, self); break;
+        case Skin::rack:     view = std::make_unique<RackEditor> (proc, self);     break;
+        case Skin::grid:     view = std::make_unique<GridEditor> (proc, self);     break;
+    }
 
     // 右下角的拖拽角归外壳（AudioProcessorEditor 建的），它用外壳的 LookAndFeel 画——
     // 跟着皮肤换，否则硬件皮肤上会出现一个 Grid 风格的角。
@@ -205,13 +221,14 @@ Skin ParamRouletteEditor::loadSkinPreference() const
     // 每次打开界面现读（几个字节）：同一个 REAPER 里可能同时有好几个实例、好几个 DLL
     // （效果器版 / 乐器版 / 32 位桥里那个），谁换了皮肤，别的实例下次打开界面就跟上。
     const auto f = skinFile();
-    return f.existsAsFile() && f.loadFileAsString().trim() == "hardware" ? Skin::hardware : Skin::grid;
+    const auto v = f.existsAsFile() ? f.loadFileAsString().trim() : juce::String();
+    return v == "hardware" ? Skin::hardware : v == "rack" ? Skin::rack : Skin::grid;
 }
 
 void ParamRouletteEditor::saveSkinPreference (Skin s)
 {
     if (const auto f = skinFile(); f != juce::File())
-        f.replaceWithText (s == Skin::hardware ? "hardware" : "grid");
+        f.replaceWithText (s == Skin::hardware ? "hardware" : s == Skin::rack ? "rack" : "grid");
 }
 
 //==============================================================================
@@ -247,12 +264,16 @@ void ParamRouletteEditor::openHostedWindow (int slot)
 
     juce::Component::SafePointer<ParamRouletteEditor> safe (this);
 
+    // 关窗回调按**插件**找窗口，不按链位号：Rack 外观里模块能拖着换位置，
+    // 窗口开着的时候它的插件可能已经挪到了别的链位上（见 hostedWindowsMoved）
     win = std::make_unique<HostedPluginWindow> (*p,
-                                                [safe, slot]
+                                                [safe, p]
                                                 {
                                                     if (auto* self = safe.getComponent())
                                                     {
-                                                        self->closeHostedWindows (slot);
+                                                        for (int i = 0; i < kMaxChain; ++i)
+                                                            if (self->proc.getSlotPlugin (i) == p)
+                                                                self->closeHostedWindows (i);
 
                                                         if (self->view != nullptr)
                                                             self->view->windowsChanged();
@@ -274,6 +295,12 @@ void ParamRouletteEditor::closeHostedWindows (int chainSlot)
 
     if (juce::isPositiveAndBelow (chainSlot, kMaxChain))
         hostedWindows[(size_t) chainSlot].reset();
+}
+
+void ParamRouletteEditor::hostedWindowsMoved (int from, int to)
+{
+    // 和 processor 挪链位用的是同一个函数，所以窗口一定还对着它自己的插件
+    moveChainPosition (hostedWindows, from, to);
 }
 
 bool ParamRouletteEditor::isHostedWindowOpen (int chainSlot) const

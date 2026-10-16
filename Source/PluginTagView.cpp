@@ -1,6 +1,7 @@
 #include "PluginTagView.h"
 #include "GridLookAndFeel.h"
 #include "HwTheme.h"
+#include "RackTheme.h"
 
 namespace pr
 {
@@ -55,15 +56,25 @@ void PluginTagView::setLook (Look l)
 {
     look = l;
 
-    const bool hwLook = look == Look::hardware;
-    teFilter.setTextToShowWhenEmpty ("按名字 / 厂牌筛选（空格分隔）"_u8, hwLook ? hw::vfdDim : theme::textFaint);
-    lCoverage.setColour (juce::Label::textColourId, hwLook ? hw::legendDim : theme::textDim);
+    const bool hwLook = look == Look::hardware, rkLook = look == Look::rack;
+    teFilter.setTextToShowWhenEmpty ("按名字 / 厂牌筛选（空格分隔）"_u8,
+                                     hwLook ? hw::vfdDim : rkLook ? juce::Colour (0xff4a4a4a) : theme::textFaint);
+    lCoverage.setColour (juce::Label::textColourId, hwLook ? hw::legendDim : rkLook ? rk::ui (0.55f) : theme::textDim);
     repaint();
     table.repaint();
 }
 
 void PluginTagView::paint (juce::Graphics& g)
 {
+    if (look == Look::rack)
+    {
+        // Rack 的暗色 UI：#202020 的底，表格放在浅一级的圆角块里（和模块浏览器一个样子）
+        g.fillAll (rk::uiBg);
+        g.setColour (rk::ui (0.05f));
+        g.fillRoundedRectangle (table.getBounds().expanded (6).toFloat(), 6.0f);
+        return;
+    }
+
     if (look == Look::hardware)
     {
         // 藏青面板上压一块荧光屏，表格就显示在屏幕里
@@ -167,6 +178,13 @@ void PluginTagView::paintRowBackground (juce::Graphics& g, int row, int w, int h
         return;
     }
 
+    if (look == Look::rack)
+    {
+        if (selected)       { g.setColour (rk::ui (0.2f));  g.fillRoundedRectangle (r, 4.0f); }
+        else if (row % 2)   { g.setColour (rk::ui (0.04f)); g.fillRoundedRectangle (r, 4.0f); }
+        return;
+    }
+
     if (selected)
     {
         g.setColour (theme::controlHi.withAlpha (0.55f));
@@ -193,6 +211,12 @@ void PluginTagView::paintCell (juce::Graphics& g, int row, int columnId,
     if (look == Look::hardware)
     {
         paintCellHardware (g, d, columnId, area);
+        return;
+    }
+
+    if (look == Look::rack)
+    {
+        paintCellRack (g, d, columnId, area);
         return;
     }
 
@@ -314,6 +338,51 @@ void PluginTagView::paintCellHardware (juce::Graphics& g, const juce::PluginDesc
             g.drawText (label, box.withTrimmedLeft (16.0f).withTrimmedRight (6.0f), juce::Justification::centred, true);
             theme::drawIcon (g, theme::Icon::chevronDown, juce::Rectangle<float> (box.getRight() + 4.0f, box.getCentreY() - 5.0f, 10.0f, 10.0f),
                              vfdDim, 1.4f);
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+void PluginTagView::paintCellRack (juce::Graphics& g, const juce::PluginDescription& d, int columnId,
+                                   juce::Rectangle<int> area)
+{
+    switch (columnId)
+    {
+        case colName:
+            g.setFont (rk::uiFont (12.5f));
+            g.setColour (rk::uiFg);
+            g.drawText (d.name, area, juce::Justification::centredLeft, true);
+            break;
+
+        case colFormat:
+            g.setFont (rk::uiFont (11.0f));
+            g.setColour (rk::ui (0.5f));
+            g.drawText (d.pluginFormatName, area, juce::Justification::centredLeft, true);
+            break;
+
+        case colTag:
+        {
+            // 标签：一颗功能色的灯 + 字（和机架上模块的色块对应）；未分类是一颗灭着的灯
+            const auto tag   = scanner.loadTag (d.createIdentifierString());
+            const auto label = fnTagLabel (tag);
+            const auto c     = theme::tagColour (tag);
+
+            g.setFont (rk::uiFont (12.0f));
+            const float tw  = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), label) + 34.0f;
+            const auto  box = area.toFloat().withSizeKeepingCentre (juce::jmin ((float) area.getWidth(), tw), 22.0f)
+                                            .withX ((float) area.getX());
+
+            g.setColour (rk::ui (tag == FnTag::Unknown ? 0.06f : 0.14f));
+            g.fillRoundedRectangle (box, 4.0f);
+            rk::paintLight (g, { box.getX() + 11.0f, box.getCentreY() }, 3.6f, c, tag == FnTag::Unknown ? 0.0f : 1.0f, true);
+
+            g.setColour (tag == FnTag::Unknown ? rk::ui (0.45f) : rk::uiFg);
+            g.drawText (label, box.withTrimmedLeft (20.0f).withTrimmedRight (6.0f), juce::Justification::centredLeft, true);
+            theme::drawIcon (g, theme::Icon::chevronDown, juce::Rectangle<float> (box.getRight() + 4.0f, box.getCentreY() - 5.0f, 10.0f, 10.0f),
+                             rk::ui (0.45f), 1.4f);
             break;
         }
 

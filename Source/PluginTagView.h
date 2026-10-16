@@ -26,7 +26,7 @@ class PluginTagView final : public juce::Component,
 public:
     /** 两套皮肤各一种画法。行为一样，只是 Grid 版是深色点阵画布上的卡片，
         硬件版是藏青面板上的一块荧光屏。 */
-    enum class Look { grid, hardware };
+    enum class Look { grid, hardware, rack };
 
     explicit PluginTagView (PluginScanner&, Look = Look::grid);
     ~PluginTagView() override;
@@ -47,6 +47,7 @@ private:
 
     //==============================================================================
     void paintCellHardware (juce::Graphics&, const juce::PluginDescription&, int columnId, juce::Rectangle<int> area);
+    void paintCellRack (juce::Graphics&, const juce::PluginDescription&, int columnId, juce::Rectangle<int> area);
     void rebuildRows();
     void updateCoverage();
     void showTagMenu (int row);

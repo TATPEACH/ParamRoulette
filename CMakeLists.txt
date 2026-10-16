@@ -137,6 +137,12 @@ set(PR_SOURCES
     Source/HwWidgets.cpp
     Source/HwPanels.cpp
     Source/HardwareEditor.cpp
+    Source/RackTheme.cpp
+    Source/RackLookAndFeel.cpp
+    Source/RackWidgets.cpp
+    Source/RackPanels.cpp
+    Source/RackBrowser.cpp
+    Source/RackEditor.cpp
     Source/PluginEditor.cpp)
 
 set(PR_HEADERS
@@ -168,6 +174,12 @@ set(PR_HEADERS
     Source/HwWidgets.h
     Source/HwPanels.h
     Source/HardwareEditor.h
+    Source/RackTheme.h
+    Source/RackLookAndFeel.h
+    Source/RackWidgets.h
+    Source/RackPanels.h
+    Source/RackBrowser.h
+    Source/RackEditor.h
     Source/PluginEditor.h)
 
 # ---------------------------------------------------------------- 两个 target

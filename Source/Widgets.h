@@ -39,7 +39,7 @@ public:
 
 protected:
     // 硬件版的「互锁按键组」是子类，只换 paint()。
-    juce::Rectangle<float> segment (int i) const;
+    virtual juce::Rectangle<float> segment (int i) const;   ///< Rack 的指示灯组是网格排的，换掉这一个就行
     int indexAt (juce::Point<float>) const;
 
     std::vector<Item> items;

@@ -235,7 +235,33 @@ void ParamRouletteProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     for (size_t i = 0; i < links.size(); ++i)
         links[i] = chain[i].link();
 
-    const auto r = runChain (links.data(), (int) links.size(), buffer, midi);
+    // 各级电平（给 Rack 外观的信号灯）。峰值保持到界面来取，只增不减——
+    // 单写者（音频线程）+ 界面 exchange 清零，最坏是丢一块的峰值，不会出错。
+    auto holdMax = [this] (int idx, float v)
+    {
+        auto& a = stagePeaks[(size_t) idx];
+        if (v > a.load (std::memory_order_relaxed))
+            a.store (v, std::memory_order_relaxed);
+    };
+    auto peakOf = [&buffer, numSamples] (int ch)
+    {
+        return ch < buffer.getNumChannels() ? buffer.getMagnitude (ch, 0, numSamples) : 0.0f;
+    };
+
+    if (! midi.isEmpty())
+        midiSeen.store (true, std::memory_order_relaxed);
+
+    if (numIn > 0)
+    {
+        holdMax (meterInL, peakOf (0));
+        holdMax (meterInR, peakOf (numIn > 1 ? 1 : 0));
+    }
+
+    std::array<float, kMaxChain> peakAfter {};
+    const auto r = runChain (links.data(), (int) links.size(), buffer, midi, peakAfter.data());
+
+    for (int i = 0; i < kMaxChain; ++i)
+        holdMax (meterSlot (i), peakAfter[(size_t) i]);
 
     if (r.skipped > 0)
     {
@@ -262,6 +288,17 @@ void ParamRouletteProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             meterPeak.store (pk, std::memory_order_relaxed);
         meterBlocks.fetch_add (1, std::memory_order_relaxed);
     }
+
+    holdMax (meterOutL, peakOf (0));
+    holdMax (meterOutR, peakOf (numOut > 1 ? 1 : 0));
+}
+
+float ParamRouletteProcessor::consumeMeterPeak (int index) noexcept
+{
+    if (! juce::isPositiveAndBelow (index, numMeters))
+        return 0.0f;
+
+    return stagePeaks[(size_t) index].exchange (0.0f, std::memory_order_relaxed);
 }
 
 void ParamRouletteProcessor::getOutputLevel (float& rms, float& peak) noexcept
@@ -501,6 +538,51 @@ juce::String ParamRouletteProcessor::getSlotName (int chainSlot) const
         return s.plugin->getName();
 
     return s.desc.name;
+}
+
+const juce::Array<ParamInfo>& ParamRouletteProcessor::getSlotModel (int chainSlot) const
+{
+    return chain[(size_t) juce::jlimit (0, kMaxChain - 1, chainSlot)].model;
+}
+
+const juce::Array<bool>& ParamRouletteProcessor::getSlotChecked (int chainSlot) const
+{
+    return chain[(size_t) juce::jlimit (0, kMaxChain - 1, chainSlot)].checked;
+}
+
+bool ParamRouletteProcessor::moveSlot (int from, int to)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+
+    if (from == to || ! juce::isPositiveAndBelow (from, kMaxChain) || ! juce::isPositiveAndBelow (to, kMaxChain))
+        return false;
+
+    // 异步加载的回调按链位号装插件；挪到一半它回来，就会装到挪动之后的那一位上。
+    if (loading)
+        return false;
+
+    // 体检拿着某一位参数模型的**引用**——挪完以后那个引用指着的是另一个插件的模型。
+    probe.cancel();
+
+    {
+        // 音频线程每块都按下标读 chain[i]。挪动只是几次 move（不分配内存），
+        // 拿着锁做是安全的，也很短。
+        const juce::ScopedLock sl (getCallbackLock());
+        moveChainPosition (chain, from, to);
+    }
+
+    bank.moveChainPosition (from, to);
+    focused = chainPositionAfterMove (focused, from, to);
+
+    // 各级电平按位置记的，挪完以后旧值属于别的插件了
+    for (auto& p : stagePeaks)
+        p.store (0.0f, std::memory_order_relaxed);
+
+    updateChainLatency();       // 总和不变；但旁通 / 空位的组合变了，重算最稳
+    ++structureGeneration;
+    hostedValuesDirty.store (true, std::memory_order_relaxed);
+    sendChangeMessage();
+    return true;
 }
 
 bool ParamRouletteProcessor::isSlotBypassed (int chainSlot) const

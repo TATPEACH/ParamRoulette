@@ -39,7 +39,7 @@ void ParamListView::setSource (juce::Array<ParamInfo>& m, juce::Array<bool>& c)
 
 void ParamListView::resized()
 {
-    viewport.setBounds (getLocalBounds().withTrimmedTop (kHeaderH));
+    viewport.setBounds (getLocalBounds().withTrimmedTop (headerH));
     updateContentSize();
 }
 
@@ -76,20 +76,20 @@ ParamListView::Cols ParamListView::layoutCols (juce::Rectangle<int> row)
 
 juce::Rectangle<int> ParamListView::headerCheckArea() const
 {
-    return layoutCols ({ 0, 0, viewport.getMaximumVisibleWidth(), kHeaderH }).check;
+    return layoutCols ({ 0, 0, viewport.getMaximumVisibleWidth(), headerH }).check;
 }
 
 void ParamListView::paint (juce::Graphics& g)
 {
     using namespace theme;
 
-    paintHeader (g, getLocalBounds().removeFromTop (kHeaderH));
+    paintHeader (g, getLocalBounds().removeFromTop (headerH));
 
     if (! visible.isEmpty())
         return;
 
     // 空状态：一个大一点的图标 + 一句告诉用户下一步该干嘛的话
-    const auto area = getLocalBounds().withTrimmedTop (kHeaderH).toFloat();
+    const auto area = getLocalBounds().withTrimmedTop (headerH).toFloat();
     const bool noPlugin = model == nullptr || model->isEmpty();
 
     const auto icon = juce::Rectangle<float> (26.0f, 26.0f).withCentre ({ area.getCentreX(), area.getCentreY() - 18.0f });
@@ -157,7 +157,7 @@ void ParamListView::paintHeader (juce::Graphics& g, juce::Rectangle<int> area)
 void ParamListView::mouseDown (const juce::MouseEvent& e)
 {
     // 只有表头那一行会落到这里（下面的行都在 Rows 里）。
-    if (e.y >= kHeaderH || ! headerCheckArea().expanded (4, 0).contains (e.getPosition()))
+    if (e.y >= headerH || ! headerCheckArea().expanded (4, 0).contains (e.getPosition()))
         return;
 
     // 已经全勾 → 全不勾；否则 → 全勾。范围是**可见行**，和「全选」按钮一致。
@@ -178,7 +178,7 @@ void ParamListView::rebuild()
 void ParamListView::refresh()
 {
     rows.repaint();
-    repaint (getLocalBounds().removeFromTop (kHeaderH));    // 表头那个三态圆圈也跟着变
+    repaint (getLocalBounds().removeFromTop (headerH));    // 表头那个三态圆圈也跟着变
 }
 
 void ParamListView::setFilter (const juce::String& text, bool onlyMatchingIn)
@@ -249,7 +249,7 @@ void ParamListView::updateContentSize()
     // 不做横向滚动：名字列吃剩下的宽度，窄了就省略号。横向滚动的表格在插件窗口里
     // 很难用（表头还得跟着滚），而且这几列本来就排得下。
     rows.setSize (juce::jmax (1, viewport.getMaximumVisibleWidth()),
-                  juce::jmax (1, visible.size() * kRowH));
+                  juce::jmax (1, visible.size() * rowH));
 }
 
 int ParamListView::getNumChecked() const noexcept
@@ -324,18 +324,18 @@ int ParamListView::rowAt (int yInRows) const noexcept
     if (yInRows < 0)
         return -1;
 
-    const int r = yInRows / kRowH;
+    const int r = yInRows / rowH;
     return juce::isPositiveAndBelow (r, visible.size()) ? r : -1;
 }
 
 void ParamListView::paintRows (juce::Graphics& g)
 {
     const auto clip = g.getClipBounds();
-    const int first = juce::jmax (0, clip.getY() / kRowH);
-    const int last  = juce::jmin (visible.size() - 1, clip.getBottom() / kRowH);
+    const int first = juce::jmax (0, clip.getY() / rowH);
+    const int last  = juce::jmin (visible.size() - 1, clip.getBottom() / rowH);
 
     for (int r = first; r <= last; ++r)
-        paintRow (g, r, { 0, r * kRowH, rows.getWidth(), kRowH });
+        paintRow (g, r, { 0, r * rowH, rows.getWidth(), rowH });
 }
 
 void ParamListView::paintRow (juce::Graphics& g, int displayRow, juce::Rectangle<int> area)
@@ -518,14 +518,14 @@ void ParamListView::paintRow (juce::Graphics& g, int displayRow, juce::Rectangle
 void ParamListView::rowsMouseMove (const juce::MouseEvent& e)
 {
     const int r = rowAt (e.y);
-    const bool overSpan = r >= 0 && layoutCols ({ 0, 0, rows.getWidth(), kRowH }).span.getHorizontalRange().contains (e.x);
+    const bool overSpan = r >= 0 && layoutCols ({ 0, 0, rows.getWidth(), rowH }).span.getHorizontalRange().contains (e.x);
 
     if (r != hoverRow || overSpan != hoverSpan)
     {
-        if (hoverRow >= 0) rows.repaint (0, hoverRow * kRowH, rows.getWidth(), kRowH);
+        if (hoverRow >= 0) rows.repaint (0, hoverRow * rowH, rows.getWidth(), rowH);
         hoverRow  = r;
         hoverSpan = overSpan;
-        if (hoverRow >= 0) rows.repaint (0, hoverRow * kRowH, rows.getWidth(), kRowH);
+        if (hoverRow >= 0) rows.repaint (0, hoverRow * rowH, rows.getWidth(), rowH);
     }
 
     rows.setMouseCursor (overSpan ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
@@ -534,7 +534,7 @@ void ParamListView::rowsMouseMove (const juce::MouseEvent& e)
 void ParamListView::rowsMouseExit (const juce::MouseEvent&)
 {
     if (hoverRow >= 0)
-        rows.repaint (0, hoverRow * kRowH, rows.getWidth(), kRowH);
+        rows.repaint (0, hoverRow * rowH, rows.getWidth(), rowH);
 
     hoverRow = -1;
     hoverSpan = false;
@@ -552,7 +552,7 @@ void ParamListView::rowsMouseDown (const juce::MouseEvent& e)
 
     // —— 点在「幅度」列上：开菜单改幅度，**不要**顺手把这一行的勾选也翻掉。
     // 想改幅度的时候被连带改了随机范围，是那种"我明明没点勾选框"的恼人 bug。
-    if (layoutCols ({ 0, 0, rows.getWidth(), kRowH }).span.getHorizontalRange().contains (e.x))
+    if (layoutCols ({ 0, 0, rows.getWidth(), rowH }).span.getHorizontalRange().contains (e.x))
     {
         showSpanMenu (mi);
         return;
@@ -569,8 +569,8 @@ void ParamListView::rowsMouseDown (const juce::MouseEvent& e)
     hasDragged = false;
     dragYInViewport = e.getEventRelativeTo (&viewport).y;
 
-    rows.repaint (0, r * kRowH, rows.getWidth(), kRowH);
-    repaint (getLocalBounds().removeFromTop (kHeaderH));
+    rows.repaint (0, r * rowH, rows.getWidth(), rowH);
+    repaint (getLocalBounds().removeFromTop (headerH));
 
     // **定时器不在这里开。** 边缘自动滚动只能在真拖动时生效——
     // 在 mouseDown 就开的话，一次静止的单击也会触发滚动 + 整段涂抹。
@@ -649,8 +649,8 @@ void ParamListView::rowsMouseDrag (const juce::MouseEvent& e)
     }
 
     lastPaintedRow = r;
-    rows.repaint (0, from * kRowH, rows.getWidth(), (to - from + 1) * kRowH);
-    repaint (getLocalBounds().removeFromTop (kHeaderH));
+    rows.repaint (0, from * rowH, rows.getWidth(), (to - from + 1) * rowH);
+    repaint (getLocalBounds().removeFromTop (headerH));
 }
 
 void ParamListView::rowsMouseUp (const juce::MouseEvent&)
@@ -678,8 +678,8 @@ void ParamListView::timerCallback()
     const int h = viewport.getViewHeight();
     int delta = 0;
 
-    if (dragYInViewport < kEdgePx)              delta = -kRowH;
-    else if (dragYInViewport > h - kEdgePx)     delta =  kRowH;
+    if (dragYInViewport < kEdgePx)              delta = -rowH;
+    else if (dragYInViewport > h - kEdgePx)     delta =  rowH;
 
     if (delta == 0)
         return;

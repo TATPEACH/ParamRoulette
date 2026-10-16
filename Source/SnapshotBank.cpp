@@ -103,6 +103,12 @@ void SnapshotBank::clearSlot (int snapSlot)
         currentWinner = -1;
 }
 
+void SnapshotBank::moveChainPosition (int from, int to)
+{
+    for (auto& s : slots)
+        pr::moveChainPosition (s.perSlot, from, to);
+}
+
 void SnapshotBank::clearAll()
 {
     for (auto& s : slots)

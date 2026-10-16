@@ -51,7 +51,7 @@ public:
 
 protected:
     // 子类（硬件版的示波器）只换 paint()，坐标换算 / 拖动 / 双击回中都用这里的。
-    juce::Rectangle<float> padArea() const;
+    virtual juce::Rectangle<float> padArea() const;    ///< 子类可以换边距（Rack 的示波器没有底部读数条）
     void  positionFromMouse (const juce::MouseEvent&);
     void  paintOneD (juce::Graphics&, juce::Rectangle<float>);
     void  paintTwoD (juce::Graphics&, juce::Rectangle<float>);

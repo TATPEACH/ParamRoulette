@@ -418,6 +418,57 @@ int main (int argc, char** argv)
                        std::abs (buf.getSample (0, 0) - 5.0f) < 1.0e-6f);
             }
 
+            // 每一位处理完之后的电平（Rack 外观的信号灯靠它找"信号死在哪一位"）
+            {
+                pr::ChainLink sparse[3];
+                sparse[0].plugin = &a;  sparse[0].channels = 2;
+                sparse[2].plugin = &c3; sparse[2].channels = 2;
+                sparse[2].bypassed = true;
+
+                AudioBuffer<float> buf (2, 64);
+                buf.clear();
+                MidiBuffer midi;
+                float peaks[3] = { -1.0f, -1.0f, -1.0f };
+                pr::runChain (sparse, 3, buf, midi, peaks);
+
+                check ("peakAfter: level after the first link (0 + 1)", std::abs (peaks[0] - 1.0f) < 1.0e-6f);
+                check ("peakAfter: an empty position passes the level through", std::abs (peaks[1] - 1.0f) < 1.0e-6f);
+                check ("peakAfter: a bypassed position passes it through too", std::abs (peaks[2] - 1.0f) < 1.0e-6f);
+            }
+
+            //-- 在机架里拖模块 = 挪链位（插入语义） ----------------------------
+            // 链位数组、快照里每链位那一份、界面上的子插件窗口三处必须用同一套挪法，
+            // 否则挪完以后它们指着不同的插件。所以挪法本身单独测。
+            {
+                auto order = [] (const std::array<char, 6>& v) { return juce::String (v.data(), 6); };
+
+                std::array<char, 6> v { 'A', 'B', '_', 'C', '_', '_' };
+                pr::moveChainPosition (v, 0, 3);
+                check ("move right: A from 0 to 3 -> B_CA__ (the ones in between shift left)", order (v) == "B_CA__");
+
+                pr::moveChainPosition (v, 3, 0);
+                check ("move left: back from 3 to 0 restores AB_C__", order (v) == "AB_C__");
+
+                pr::moveChainPosition (v, 1, 1);
+                check ("move onto itself is a no-op", order (v) == "AB_C__");
+
+                pr::moveChainPosition (v, 0, 9);
+                check ("out-of-range move is ignored, not overrun", order (v) == "AB_C__");
+
+                // 跟着挪的下标（聚焦、子插件窗口）必须和数组的挪法完全一致
+                bool consistent = true;
+                for (int from = 0; from < 6; ++from)
+                    for (int to = 0; to < 6; ++to)
+                    {
+                        std::array<char, 6> w { 'a', 'b', 'c', 'd', 'e', 'f' };
+                        pr::moveChainPosition (w, from, to);
+                        for (int i = 0; i < 6; ++i)
+                            if (w[(size_t) pr::chainPositionAfterMove (i, from, to)] != (char) ('a' + i))
+                                consistent = false;
+                    }
+                check ("chainPositionAfterMove agrees with moveChainPosition for all 36 moves", consistent);
+            }
+
             // 延迟 / 尾巴求和
             {
                 AddConst la { 0.0f, 0, 0.5 }, lb { 0.0f, 0, 1.5 };

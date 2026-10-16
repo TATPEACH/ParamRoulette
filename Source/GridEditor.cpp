@@ -113,7 +113,7 @@ GridEditor::GridEditor (ParamRouletteProcessor& p, EditorHost& h)
 
     for (auto [b, ic, tip] : { std::tuple { &bUI,     Icon::window, "打开 / 关闭当前链位插件的界面（也可以双击信号链里的模块）"_u8 },
                                 std::tuple { &bUnload, Icon::eject,  "把当前链位的插件卸掉"_u8 },
-                                std::tuple { &bSkin,   Icon::knob,   "换成音频硬件拟物风的界面（藏青面板、旋钮、VU 表）。功能完全一样，随时可以换回来"_u8 },
+                                std::tuple { &bSkin,   Icon::knob,   "换一套外观：硬件拟物风 / VCV Rack 风。功能完全一样，随时可以换回来"_u8 },
                                 std::tuple { &bScan,   Icon::scan,   "扫描插件（可以增删搜索路径）"_u8 },
                                 std::tuple { &bTags,   Icon::tag,    "给插件打功能标签。信号链上模块和连线的颜色就来自这里"_u8 } })
     {
@@ -125,7 +125,7 @@ GridEditor::GridEditor (ParamRouletteProcessor& p, EditorHost& h)
 
     bUI.onClick     = [this] { toggleHostedWindow(); };
     bUnload.onClick = [this] { doUnload (proc.getFocusedSlot()); };
-    bSkin.onClick   = [this] { host.requestSkin (Skin::hardware); };
+    bSkin.onClick   = [this] { showSkinMenu (bSkin, Skin::grid); };
     bScan.onClick   = [this] { showScanWindow(); };
     bTags.onClick   = [this] { showTagWindow(); };
 

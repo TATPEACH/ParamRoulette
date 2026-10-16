@@ -114,6 +114,17 @@ public:
     bool isSlotBypassed (int chainSlot) const;
     void setSlotBypassed (int chainSlot, bool);
 
+    /** 把链位 `from` 上的插件挪到 `to`，中间的依次让位（插入语义，见 `moveChainPosition`）。
+
+        挪的是**整个链位**：插件、勾选表、基座、历史、旁通都跟着它走——
+        在机架里拖一个模块，用户以为挪的是"这个效果器"，它的旁通状态当然也跟着。
+        （"旁通是位置的属性"那条说的是**换插件**不重置它，和这里不矛盾。）
+        每份快照里那一位的状态也一起挪，聚焦跟着插件走。
+
+        异步加载还没回来的时候拒绝（返回 false）：加载回调是按链位号装的，
+        中途挪动会让它装到错的位置上。必须在消息线程上调用。 */
+    bool moveSlot (int from, int to);
+
     /** 链上一共装了几个插件。界面用它决定要不要显示链相关的东西。 */
     int getNumLoadedSlots() const;
 
@@ -125,6 +136,11 @@ public:
 
     /** 指定链位的插件实例。界面开浮动窗口要用（每链位一个窗口）。 */
     juce::AudioPluginInstance* getSlotPlugin (int chainSlot) const;
+
+    /** 任意链位的参数模型 / 勾选表（只读）。Rack 外观的每个模块上都画着
+        自己那个插件的参数图，不能只看聚焦的那一位。 */
+    const juce::Array<ParamInfo>& getSlotModel (int chainSlot) const;
+    const juce::Array<bool>&      getSlotChecked (int chainSlot) const;
 
 
     //==============================================================================
@@ -301,6 +317,20 @@ public:
         所以连续 ~200ms 没有新块就当作静音报 0——不然指针会定在半空。 */
     void getOutputLevel (float& rms, float& peak) noexcept;
 
+    /** 各级的峰值电平（线性），给 Rack 外观每个模块上的信号灯用。读一次就清。
+        下标：`meterInL/R` 输入，`meterSlot (i)` 第 i 个链位处理完之后，`meterOutL/R` 输出。 */
+    static constexpr int meterInL  = 0;
+    static constexpr int meterInR  = 1;
+    static constexpr int meterSlot (int i) noexcept { return 2 + i; }
+    static constexpr int meterOutL = 2 + kMaxChain;
+    static constexpr int meterOutR = 3 + kMaxChain;
+    static constexpr int numMeters = 4 + kMaxChain;
+
+    float consumeMeterPeak (int index) noexcept;
+
+    /** 自上次询问以来宿主送进来过 MIDI 吗？读一次就清。 */
+    bool consumeMidiActivity() noexcept { return midiSeen.exchange (false); }
+
     MorphMode getMorphMode() const noexcept
     {
         return pMorphMode->getIndex() == 1 ? MorphMode::TwoD : MorphMode::OneD;
@@ -414,6 +444,9 @@ private:
     std::atomic<float>    meterRms    { 0.0f };
     std::atomic<float>    meterPeak   { 0.0f };
     std::atomic<uint32_t> meterBlocks { 0 };
+
+    std::array<std::atomic<float>, (size_t) numMeters> stagePeaks {};
+    std::atomic<bool> midiSeen { false };
     uint32_t meterLastSeen = 0;       ///< 只有消息线程碰
     int      meterStale    = 0;
 

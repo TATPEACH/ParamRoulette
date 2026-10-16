@@ -54,12 +54,12 @@ void HwParamList::paint (juce::Graphics& g)
     using namespace hw;
 
     paintGlass (g, getLocalBounds().toFloat(), glass, vfd, 3.0f);
-    paintHeader (g, getLocalBounds().removeFromTop (kHeaderH));
+    paintHeader (g, getLocalBounds().removeFromTop (headerH));
 
     if (! visible.isEmpty())
         return;
 
-    const auto area = getLocalBounds().withTrimmedTop (kHeaderH).toFloat();
+    const auto area = getLocalBounds().withTrimmedTop (headerH).toFloat();
     const bool noPlugin = model == nullptr || model->isEmpty();
 
     drawGlowText (g, noPlugin ? "NO PLUGIN" : "NO MATCH", area.withHeight (28.0f).withCentre ({ area.getCentreX(), area.getCentreY() - 20.0f }),

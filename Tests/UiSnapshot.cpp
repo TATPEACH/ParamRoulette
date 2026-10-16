@@ -13,7 +13,7 @@
 //
 //   pr_uisnap.exe [输出目录]          默认 build/ui_snap
 //
-// 两套皮肤各出一组：01~05 是 Grid，hw_01~hw_05 是硬件拟物风。
+// 三套皮肤各出一组：01~05 是 Grid，hw_ 开头的是硬件拟物风，rk_ 开头的是 VCV Rack 风。
 // Grid 那几张改共享代码前后要**逐像素一致**（种子固定），拿来确认改一套皮肤没有碰到另一套。
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -24,6 +24,8 @@
 #include "GridLookAndFeel.h"
 #include "HardwareLookAndFeel.h"
 #include "HardwareEditor.h"
+#include "RackLookAndFeel.h"
+#include "RackEditor.h"
 #include "PluginTagView.h"
 
 #include <iostream>
@@ -38,6 +40,20 @@ namespace
     void pump (int ms)
     {
         MessageManager::getInstance()->runDispatchLoopUntil (ms);
+    }
+
+    /** 在组件树里找第一个 T（深度优先）。 */
+    template <typename T>
+    T* findChild (Component& root)
+    {
+        for (auto* c : root.getChildren())
+        {
+            if (auto* t = dynamic_cast<T*> (c))
+                return t;
+            if (auto* t = findChild<T> (*c))
+                return t;
+        }
+        return nullptr;
     }
 
     //==============================================================================
@@ -319,6 +335,7 @@ int main (int argc, char** argv)
         const auto dir = File::getSpecialLocation (File::userApplicationDataDirectory).getChildFile ("ParamRoulette");
         dir.getChildFile ("ParamRoulette-uisnap.settings").deleteFile();
         dir.getChildFile ("ParamRoulette-uisnap.skin").deleteFile();
+        dir.getChildFile ("ParamRoulette-uisnap.rackview").deleteFile();
     }
 
     line ("ParamRoulette UI snapshot");
@@ -332,23 +349,55 @@ int main (int argc, char** argv)
                                           : String ("no")));
     }
 
-    // roundTrip：同一个界面先换到另一套皮肤、再换回来，然后才截图。
+    // roundTrip：同一个界面先依次换到另外两套皮肤、再换回来，然后才截图。
     // 它必须和直接打开的那张**逐像素一样**——换皮肤不能留下任何残渣。
+    // dark：Rack 的深色面板 + 房间调暗；browser：打开 Rack 的模块浏览器。
     struct Scenario { const char* file; bool populated; bool motion; bool twoD; bool minSize; const char* filter; pr::Skin skin;
-                      bool roundTrip = false; };
+                      bool roundTrip; bool dark; bool browser; };
 
     const Scenario scenarios[] =
     {
-        { "01_main",      true,  false, false, false, "",   pr::Skin::grid },
-        { "02_motion",    true,  true,  true,  false, "eg", pr::Skin::grid },
-        { "03_empty",     false, false, false, false, "",   pr::Skin::grid },
-        { "04_min",       true,  false, false, true,  "",   pr::Skin::grid },
-        { "hw_01_main",   true,  false, false, false, "",   pr::Skin::hardware },
-        { "hw_02_motion", true,  true,  true,  false, "eg", pr::Skin::hardware },
-        { "hw_03_empty",  false, false, false, false, "",   pr::Skin::hardware },
-        { "hw_04_min",    true,  false, false, true,  "",   pr::Skin::hardware },
-        { "06_roundtrip_grid", true, false, false, false, "", pr::Skin::grid,     true },
-        { "06_roundtrip_hw",   true, false, false, false, "", pr::Skin::hardware, true },
+        { "01_main",      true,  false, false, false, "",   pr::Skin::grid,     false, false, false },
+        { "02_motion",    true,  true,  true,  false, "eg", pr::Skin::grid,     false, false, false },
+        { "03_empty",     false, false, false, false, "",   pr::Skin::grid,     false, false, false },
+        { "04_min",       true,  false, false, true,  "",   pr::Skin::grid,     false, false, false },
+        { "hw_01_main",   true,  false, false, false, "",   pr::Skin::hardware, false, false, false },
+        { "hw_02_motion", true,  true,  true,  false, "eg", pr::Skin::hardware, false, false, false },
+        { "hw_03_empty",  false, false, false, false, "",   pr::Skin::hardware, false, false, false },
+        { "hw_04_min",    true,  false, false, true,  "",   pr::Skin::hardware, false, false, false },
+        { "rk_01_main",   true,  false, false, false, "",   pr::Skin::rack,     false, false, false },
+        { "rk_02_motion", true,  true,  true,  false, "eg", pr::Skin::rack,     false, false, false },
+        { "rk_03_empty",  false, false, false, false, "",   pr::Skin::rack,     false, false, false },
+        { "rk_04_min",    true,  false, false, true,  "",   pr::Skin::rack,     false, false, false },
+        { "rk_07_dark",   true,  true,  false, false, "",   pr::Skin::rack,     false, true,  false },
+        { "rk_08_browser",true,  false, false, false, "",   pr::Skin::rack,     false, false, true  },
+        { "06_roundtrip_grid", true, false, false, false, "", pr::Skin::grid,     true, false, false },
+        { "06_roundtrip_hw",   true, false, false, false, "", pr::Skin::hardware, true, false, false },
+        { "06_roundtrip_rk",   true, false, false, false, "", pr::Skin::rack,     true, false, false },
+    };
+
+    // 浏览器那一张要有东西可列：塞一串假的已扫描插件，一部分打好标签
+    auto addFakeKnownPlugins = [] (pr::PluginScanner& sc)
+    {
+        const char* names[] = { "Disperser", "FabFilter Pro-Q 4", "ACDD", "ACEH", "Valhalla VintageVerb",
+                                "bx_saturator V2", "EchoBoy", "OTT", "kHs Phaser", "GRM Freeze Stereo",
+                                "Allpass Network", "ACGQ", "Cluster Delay", "Pitch Monster" };
+        const char* brands[] = { "Kilohearts", "FabFilter", "Acustica", "Acustica", "Valhalla DSP", "Plugin Alliance",
+                                 "Soundtoys", "Xfer", "Kilohearts", "GRM", "", "Acustica", "Native Instruments", "Eventide" };
+
+        for (int i = 0; i < (int) std::size (names); ++i)
+        {
+            PluginDescription d;
+            d.name = names[i];
+            d.manufacturerName = brands[i];
+            d.pluginFormatName = String (names[i]).startsWith ("AC") ? "VST" : "VST3";
+            d.fileOrIdentifier = "demo://" + String (names[i]);
+            d.uniqueId = String (names[i]).hashCode();
+            sc.getKnownPlugins().addType (d);
+
+            if (const auto t = pr::PluginScanner::guessTag (names[i]); t != pr::FnTag::Unknown && String (names[i]).length() % 2 == 0)
+                sc.saveTag (d.createIdentifierString(), t);
+        }
     };
 
     for (const auto& sc : scenarios)
@@ -364,6 +413,15 @@ int main (int argc, char** argv)
 
         if (sc.populated)
             populate (*rig.proc, sc.motion);
+
+        if (sc.browser)
+            addFakeKnownPlugins (rig.proc->getScanner());
+
+        if (sc.dark)
+        {
+            pr::rk::view().darkPanels     = true;
+            pr::rk::view().roomBrightness = 0.38f;
+        }
 
         *rig.proc->pMorphMode = sc.twoD ? 1 : 0;
         *rig.proc->pMorphX    = sc.twoD ? 0.32f : 0.4f;
@@ -391,9 +449,14 @@ int main (int argc, char** argv)
 
         if (sc.roundTrip)
         {
-            const auto other = sc.skin == pr::Skin::grid ? pr::Skin::hardware : pr::Skin::grid;
-            pump (150);
-            shell->setSkin (other);
+            // 依次走过另外两套再回来
+            for (const auto other : { pr::Skin::grid, pr::Skin::hardware, pr::Skin::rack })
+            {
+                if (other == sc.skin)
+                    continue;
+                pump (150);
+                shell->setSkin (other);
+            }
             pump (150);
             shell->setSkin (sc.skin);
 
@@ -411,21 +474,40 @@ int main (int argc, char** argv)
 
         // 截图里没有音频在跑，VU 指针会停在左端。摆到一个典型读数上（−3 VU），看得出表盘长什么样
         for (auto* c : shell->getChildren())
+        {
             if (auto* hwEd = dynamic_cast<pr::HardwareEditor*> (c))
                 hwEd->setVuForTesting (sc.populated ? -3.0f : -20.0f);
 
+            // Rack 的信号灯同理：摆一个典型的电平（每往后一位低一点），看得出灯和插头长什么样
+            if (auto* rkEd = dynamic_cast<pr::RackEditor*> (c))
+            {
+                rkEd->setLevelsForTesting (sc.populated ? 0.5f : 0.0f);
+
+                if (sc.browser)
+                {
+                    rkEd->openBrowserForTesting (2);
+                    pump (200);
+                }
+            }
+        }
+
         render (*rig.editor, outDir.getChildFile (String (sc.file) + ".png"), 1.0f);
+
+        if (sc.dark)
+            pr::rk::view() = pr::rk::View {};
     }
 
-    for (const bool hwLook : { false, true })
+    for (const auto look : { pr::PluginTagView::Look::grid, pr::PluginTagView::Look::hardware, pr::PluginTagView::Look::rack })
     {
-        const String file = hwLook ? "hw_05_tags" : "05_tags";
+        const String file = look == pr::PluginTagView::Look::hardware ? "hw_05_tags"
+                          : look == pr::PluginTagView::Look::rack     ? "rk_05_tags" : "05_tags";
         line();
         line ("== " + file);
 
         // 插件标签窗口单独画一张：塞一串假的已扫描插件，一部分预先打好标签
         pr::GridLookAndFeel     gridLf;
         pr::HardwareLookAndFeel hwLf;
+        pr::RackLookAndFeel     rkLf;
         pr::PluginScanner sc;
 
         const char* names[] = { "Disperser", "FabFilter Pro-Q 4", "ACDD", "ACEH", "Valhalla VintageVerb",
@@ -445,8 +527,10 @@ int main (int argc, char** argv)
                 sc.saveTag (d.createIdentifierString(), t);
         }
 
-        pr::PluginTagView view (sc, hwLook ? pr::PluginTagView::Look::hardware : pr::PluginTagView::Look::grid);
-        view.setLookAndFeel (hwLook ? static_cast<LookAndFeel*> (&hwLf) : &gridLf);
+        pr::PluginTagView view (sc, look);
+        view.setLookAndFeel (look == pr::PluginTagView::Look::hardware ? static_cast<LookAndFeel*> (&hwLf)
+                           : look == pr::PluginTagView::Look::rack     ? static_cast<LookAndFeel*> (&rkLf)
+                                                                        : static_cast<LookAndFeel*> (&gridLf));
         view.setSize (660, 560);
 
         // 「只看未分类」默认是开的，截图要看到彩色标签就把它关掉
@@ -457,6 +541,137 @@ int main (int argc, char** argv)
         pump (200);
         render (view, outDir.getChildFile (file + ".png"), 1.0f);
         view.setLookAndFeel (nullptr);
+    }
+
+    // Rack 的菜单和提示气泡：它们是单独的顶层窗口，截界面截不到，这里照着 PopupMenu 的
+    // 画法把 LookAndFeel 的那几个函数直接调一遍，看样式（视图菜单 + 模块右键菜单 + 两种提示）
+    {
+        line();
+        line ("== rk_09_menus");
+
+        struct Row
+        {
+            enum Kind { header, item, separator, slider } kind;
+            String text, shortcut;
+            bool ticked = false, enabled = true, sub = false, hot = false;
+            float value = 0.0f;
+        };
+
+        class Sheet final : public Component
+        {
+        public:
+            std::vector<std::pair<Rectangle<int>, std::vector<Row>>> menus;
+            String tooltip;
+            Point<int> tooltipAt;
+
+            void paint (Graphics& g) override
+            {
+                auto& lf = getLookAndFeel();
+                const PopupMenu::Options opts;
+                g.fillAll (pr::rk::rackBg);
+
+                for (const auto& [area, rows] : menus)
+                {
+                    std::vector<int> hs;
+                    int total = 0;
+                    for (const auto& r : rows)
+                    {
+                        int iw = 0, ih = 0;
+                        if (r.kind == Row::slider)
+                            pr::RackMenuSlider (r.text, r.value, r.value, nullptr).getIdealSize (iw, ih);
+                        else
+                        {
+                            lf.getIdealPopupMenuItemSizeWithOptions (r.text, r.kind == Row::separator, -1, iw, ih, opts);
+                            if (r.kind == Row::header)
+                                ih += ih / 2;       // JUCE 的 HeaderItemComponent 也是这么加的
+                        }
+                        hs.push_back (ih);
+                        total += ih;
+                    }
+
+                    const int border = lf.getPopupMenuBorderSizeWithOptions (opts);
+                    const auto box = area.withHeight (total + 2 * border);
+                    {
+                        Graphics::ScopedSaveState s (g);
+                        g.setOrigin (box.getPosition());
+                        lf.drawPopupMenuBackgroundWithOptions (g, box.getWidth(), box.getHeight(), opts);
+                    }
+
+                    int y = box.getY() + border;
+                    for (size_t i = 0; i < rows.size(); ++i)
+                    {
+                        const auto& r = rows[i];
+                        const Rectangle<int> local (0, 0, box.getWidth() - 2 * border, hs[i]);
+                        Graphics::ScopedSaveState s (g);
+                        g.setOrigin ({ box.getX() + border, y });
+
+                        if (r.kind == Row::header)
+                            lf.drawPopupMenuSectionHeaderWithOptions (g, local, r.text, opts);
+                        else if (r.kind == Row::slider)
+                        {
+                            pr::RackMenuSlider sl (r.text, r.value, r.value, nullptr);
+                            sl.setSize (local.getWidth(), local.getHeight());
+                            sl.paint (g);
+                        }
+                        else
+                        {
+                            PopupMenu::Item it (r.text);
+                            it.isSeparator = r.kind == Row::separator;
+                            it.isTicked    = r.ticked;
+                            it.isEnabled   = r.enabled;
+                            it.shortcutKeyDescription = r.shortcut;
+                            if (r.sub)
+                                it.subMenu = std::make_unique<PopupMenu>();
+                            lf.drawPopupMenuItemWithOptions (g, local, r.hot, it, opts);
+                        }
+                        y += hs[i];
+                    }
+                }
+
+                const auto tb = lf.getTooltipBounds (tooltip, tooltipAt, getLocalBounds());
+                Graphics::ScopedSaveState s (g);
+                g.setOrigin (tb.getPosition());
+                lf.drawTooltip (g, tooltip, tb.getWidth(), tb.getHeight());
+            }
+        };
+
+        pr::RackLookAndFeel rkLf;
+        Sheet sheet;
+        sheet.setLookAndFeel (&rkLf);
+        sheet.setSize (700, 440);
+
+        const pr::rk::View defaults;
+        sheet.menus.push_back ({ { 16, 16, 300, 0 }, {
+            { Row::item,      "外观"_u8, {}, false, true, true },
+            { Row::header,    "机架"_u8 },
+            { Row::item,      "深色面板"_u8 },
+            { Row::slider,    "线缆不透明度"_u8, {}, false, true, false, false, defaults.cableOpacity },
+            { Row::slider,    "线缆张力"_u8,     {}, false, true, false, false, defaults.cableTension },
+            { Row::slider,    "房间亮度"_u8,     {}, false, true, false, false, defaults.roomBrightness },
+            { Row::slider,    "灯光晕"_u8,       {}, false, true, false, false, defaults.halo },
+            { Row::separator, {} },
+            { Row::item,      "恢复默认"_u8 } } });
+
+        sheet.menus.push_back ({ { 340, 16, 300, 0 }, {
+            { Row::header,    "fauna   ·   链位 1"_u8 },
+            { Row::item,      "打开插件界面"_u8, {}, false, true, false, true },
+            { Row::item,      "更换插件…"_u8 },
+            { Row::item,      "旁通"_u8, "Ctrl+E", true },
+            { Row::separator, {} },
+            { Row::item,      "左移"_u8, "Ctrl+Left", false, false },
+            { Row::item,      "右移"_u8, "Ctrl+Right" },
+            { Row::separator, {} },
+            { Row::item,      "卸载"_u8 } } });
+
+        sheet.tooltip   = "fauna\n点一下聚焦 · 双击开插件界面 · 按住拖动调顺序"_u8;
+        sheet.tooltipAt = { 40, 330 };
+
+        pr::RackTip tip;
+        sheet.addChildComponent (tip);
+        tip.show ("强度：62 %"_u8, { 470, 380, 40, 40 });
+
+        render (sheet, outDir.getChildFile ("rk_09_menus.png"), 1.0f);
+        sheet.setLookAndFeel (nullptr);
     }
 
     // 换皮肤往返：和直接打开的那张必须逐像素一致
@@ -480,9 +695,186 @@ int main (int argc, char** argv)
 
         const bool ok1 = same ("01_main",    "06_roundtrip_grid");
         const bool ok2 = same ("hw_01_main", "06_roundtrip_hw");
+        const bool ok3 = same ("rk_01_main", "06_roundtrip_rk");
 
-        if (! (ok1 && ok2))
+        if (! (ok1 && ok2 && ok3))
             return 2;
+    }
+
+    // 在机架里拖模块 = ParamRouletteProcessor::moveSlot。这是这一轮唯一动了 processor
+    // 状态的改动，而它碰的恰好是上一轮出过 bug 的地方（快照和链位的对应关系）——
+    // 截图工具是唯一能构造真 processor + 假插件的地方，所以检查放在这里。
+    {
+        line();
+        line ("== chain move (processor)");
+
+        Rig rig;
+        rig.proc = std::make_unique<pr::ParamRouletteProcessor>();
+        rig.proc->seedForTesting (20261015);
+        rig.proc->setPlayConfigDetails (2, 2, 48000.0, 512);
+        rig.proc->prepareToPlay (48000.0, 512);
+        populate (*rig.proc, false);       // 0 fauna、1 Disperser、3 Pro-Q；快照 1 / 2 存过
+
+        auto& p = *rig.proc;
+        int fails = 0;
+        auto check = [&fails] (const String& what, bool ok)
+        {
+            line (String (ok ? "  ok    " : "  FAIL  ") + what);
+            if (! ok) ++fails;
+        };
+
+        auto order = [&p]
+        {
+            String s;
+            for (int i = 0; i < pr::kMaxChain; ++i)
+                s << (p.isSlotLoaded (i) ? p.getSlotName (i).substring (0, 1) : String ("_"));
+            return s;
+        };
+
+        const auto faunaId = p.getSlotPlugin (0)->getPluginDescription().createIdentifierString();
+        const auto dispId  = p.getSlotPlugin (1)->getPluginDescription().createIdentifierString();
+
+        p.setFocusedSlot (0);
+        p.setSlotBypassed (3, true);
+        check ("start: fD_F__", order() == "fD_F__");
+
+        check ("moveSlot (0, 3) succeeds", p.moveSlot (0, 3));
+        check ("order after move: D_Ff__ (the ones in between shift left)", order() == "D_Ff__");
+        check ("focus followed fauna to position 3", p.getFocusedSlot() == 3 && p.getHostedName() == "fauna");
+        check ("bypass moved with Pro-Q (now at 2), fauna is not bypassed",
+               p.isSlotBypassed (2) && ! p.isSlotBypassed (3));
+        check ("parameter model follows the plugin", p.getModel().size() == p.getSlotPlugin (3)->getParameters().size());
+        check ("snapshot 1: fauna's state moved to position 3", p.getBank()[0].perSlot[3].pluginId == faunaId);
+        check ("snapshot 1: Disperser's state moved to position 0", p.getBank()[0].perSlot[0].pluginId == dispId);
+
+        // 召回必须把 fauna 的状态喂回 fauna（不是被身份校验挡掉、也不是喂给别人）
+        {
+            auto* fauna = p.getSlotPlugin (3);
+            auto* prm   = fauna->getParameters()[0];
+            const float stored = p.getBank()[0].perSlot[3].values.empty() ? -1.0f : p.getBank()[0].perSlot[3].values[0];
+            prm->setValueNotifyingHost (stored < 0.5f ? 0.97f : 0.03f);
+            p.recallSlot (0);
+            check ("recalling snapshot 1 after the move restores fauna", std::abs (prm->getValue() - stored) < 1.0e-4f);
+        }
+
+        check ("moveSlot (3, 0) moves it back", p.moveSlot (3, 0) && order() == "fD_F__");
+        check ("and the bypass is back on position 3", p.isSlotBypassed (3) && ! p.isSlotBypassed (0));
+        check ("moving onto itself is refused", ! p.moveSlot (2, 2));
+
+        if (fails > 0)
+            return 3;
+    }
+
+    // Rack 外观里"手势 → 动作"的那一段接线：用鼠标事件拖模块（走 RackChainRow 的
+    // mouseDown / Drag / Up）、Ctrl+← / → 挪聚焦的模块、Ctrl+E 旁通、Enter 开浏览器 / Esc 关。
+    // moveSlot 本身上面查过了；这里查的是手势有没有接到对的地方、阈值对不对。
+    {
+        line();
+        line ("== rack gestures");
+
+        Rig rig;
+        rig.proc = std::make_unique<pr::ParamRouletteProcessor>();
+        rig.proc->seedForTesting (20261015);
+        rig.proc->setPlayConfigDetails (2, 2, 48000.0, 512);
+        rig.proc->prepareToPlay (48000.0, 512);
+        populate (*rig.proc, false);       // 0 fauna、1 Disperser、3 Pro-Q
+
+        rig.editor.reset (rig.proc->createEditorIfNeeded());
+        auto* shell = dynamic_cast<pr::ParamRouletteEditor*> (rig.editor.get());
+        if (shell == nullptr)
+        {
+            line ("  FAILED: no editor");
+            return 4;
+        }
+
+        shell->setSkin (pr::Skin::rack);
+        shell->setSize (1280, 820);
+        pump (300);
+
+        auto& p  = *rig.proc;
+        auto* ed  = findChild<pr::RackEditor> (*shell);
+        auto* row = findChild<pr::RackChainRow> (*shell);
+        auto* br  = findChild<pr::RackBrowser> (*shell);
+
+        if (ed == nullptr || row == nullptr || br == nullptr)
+        {
+            line ("  FAIL  rack editor parts not found");
+            return 4;
+        }
+
+        int fails = 0;
+        auto check = [&fails] (const String& what, bool ok)
+        {
+            line (String (ok ? "  ok    " : "  FAIL  ") + what);
+            if (! ok) ++fails;
+        };
+
+        auto order = [&p]
+        {
+            String s;
+            for (int i = 0; i < pr::kMaxChain; ++i)
+                s << (p.isSlotLoaded (i) ? p.getSlotName (i).substring (0, 1) : String ("_"));
+            return s;
+        };
+
+        auto mouse = [row] (Point<float> pos, Point<float> down, bool dragged)
+        {
+            const auto now = Time::getCurrentTime();
+            return MouseEvent (Desktop::getInstance().getMainMouseSource(), pos,
+                               ModifierKeys (ModifierKeys::leftButtonModifier),
+                               MouseInputSource::defaultPressure, MouseInputSource::defaultOrientation,
+                               MouseInputSource::defaultRotation, MouseInputSource::defaultTiltX,
+                               MouseInputSource::defaultTiltY, row, row, now, down, now, 1, dragged);
+        };
+
+        // 按在模块的名字那一行（模块本体，不是键也不是 program 屏）
+        auto grip = [row] (int slot) { const auto m = row->moduleArea (slot); return Point<float> (m.getCentreX(), m.getY() + 30.0f); };
+
+        {
+            const auto down = grip (0);
+            const auto to   = down.translated (row->moduleArea (2).getCentreX() - row->moduleArea (0).getCentreX(), 0.0f);
+
+            row->mouseDown (mouse (down, down, false));
+            row->mouseDrag (mouse (down.translated (3.0f, 0.0f), down, true));
+            check ("a 3 px wiggle is not a drag yet", ! row->isDraggingModule());
+            row->mouseDrag (mouse (to, down, true));
+            check ("past the threshold it becomes a module drag", row->isDraggingModule());
+            row->mouseUp (mouse (to, down, true));
+            pump (100);
+            check ("drag fauna onto position 3: fD_F__ -> D_fF__", order() == "D_fF__");
+            check ("fauna keeps the focus after the drop", p.getFocusedSlot() == 2 && p.getHostedName() == "fauna");
+            check ("drag state is cleared on mouse up", ! row->isDraggingModule());
+        }
+
+        {
+            const auto at = grip (0);
+            row->mouseDown (mouse (at, at, false));
+            row->mouseUp (mouse (at, at, false));
+            pump (100);
+            check ("a click without dragging only focuses", order() == "D_fF__" && p.getFocusedSlot() == 0);
+            p.setFocusedSlot (2);
+            pump (100);
+        }
+
+        ed->keyPressed (KeyPress (KeyPress::rightKey, ModifierKeys::ctrlModifier, 0));
+        pump (100);
+        check ("Ctrl+Right moves the focused module right", order() == "D_Ff__" && p.getFocusedSlot() == 3);
+        ed->keyPressed (KeyPress (KeyPress::leftKey, ModifierKeys::ctrlModifier, 0));
+        pump (100);
+        check ("Ctrl+Left moves it back", order() == "D_fF__" && p.getFocusedSlot() == 2);
+
+        ed->keyPressed (KeyPress ('E', ModifierKeys::ctrlModifier, 0));
+        check ("Ctrl+E bypasses the focused module", p.isSlotBypassed (2));
+        ed->keyPressed (KeyPress ('E', ModifierKeys::ctrlModifier, 0));
+        check ("Ctrl+E again turns it back on", ! p.isSlotBypassed (2));
+
+        ed->keyPressed (KeyPress (KeyPress::returnKey));
+        check ("Enter opens the module browser", br->isVisible());
+        ed->keyPressed (KeyPress (KeyPress::escapeKey));
+        check ("Esc closes it", ! br->isVisible());
+
+        if (fails > 0)
+            return 4;
     }
 
     line();

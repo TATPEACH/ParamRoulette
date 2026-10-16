@@ -94,7 +94,7 @@ private:
     juce::ComboBox   cbPreset;
     juce::TextButton bUI     { "界面"_u8 };
     juce::TextButton bUnload { "卸载"_u8 };
-    juce::TextButton bSkin   { "Grid 外观"_u8 };
+    juce::TextButton bSkin   { "外观"_u8 };
     juce::TextButton bScan   { "扫描"_u8 };
     juce::TextButton bTags   { "标签"_u8 };
 

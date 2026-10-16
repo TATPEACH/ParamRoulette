@@ -205,7 +205,7 @@ private:
 
     数字键上的灯：熄 = 空，暗 = 存了东西，全亮 = 当前声音就是它（召回过 / morph 权重最大）。
     键盘照旧：1–4 召回，Shift+1–4 存入。 */
-class HwMemoryBank final : public juce::Component,
+class HwMemoryBank : public juce::Component,
                            public juce::TooltipClient,
                            private juce::Timer
 {
@@ -225,10 +225,11 @@ public:
 
     bool isArmed() const noexcept { return armed; }
 
-private:
+protected:
+    // Rack 外观的快照模块是它的子类：同一套"先按写入再按数字"的手势，只换布局和画法。
     void timerCallback() override;
     void setArmed (bool);
-    juce::Rectangle<float> keyRect (int i) const;     ///< 0..3 = 数字键，4 = 写入键
+    virtual juce::Rectangle<float> keyRect (int i) const;     ///< 0..3 = 数字键，4 = 写入键
     int  keyAt (juce::Point<float>) const;
     void showMenu (int i);
 

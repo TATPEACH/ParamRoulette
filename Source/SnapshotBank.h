@@ -125,6 +125,11 @@ public:
     void clearSlot (int snapSlot);
     void clearAll();
 
+    /** 链上的插件挪了位置（见 `moveChainPosition`），每份快照里那一位的状态跟着挪。
+        不挪的话召回时"链位 3 的状态"会去找现在在链位 3 的另一个插件——
+        身份校验会挡住不喂错，但那个插件就再也召回不出来了。 */
+    void moveChainPosition (int from, int to);
+
     /** 精确召回：每链位用它自己的状态块还原，连宿主看不见的内部状态也一起回来。
         返回实际还原了几个链位。 */
     int recall (int snapSlot, const SnapTarget* targets, int numTargets);

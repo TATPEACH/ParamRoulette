@@ -37,9 +37,14 @@ bool runLink (const ChainLink&, juce::AudioBuffer<float>&, juce::MidiBuffer&);
 /** 按顺序跑整条链，前一个的输出就是后一个的输入。
 
     **MIDI 用同一个 buffer 串下去**，所以前一个插件的 MIDI 输出会进到后一个——
-    这正是真实效果器链的行为（琶音器接合成器、MIDI 触发的门等等都靠这个）。 */
+    这正是真实效果器链的行为（琶音器接合成器、MIDI 触发的门等等都靠这个）。
+
+    `peakAfter`（可选，numLinks 个）：每一位处理完之后的峰值（各声道取大的），
+    空位 / 旁通位就是穿过它的电平。界面上每个模块的信号灯靠它——
+    "链上第二个插件没声音"这种问题，一眼就能看出信号死在了哪一位。 */
 ChainRunResult runChain (const ChainLink* links, int numLinks,
-                         juce::AudioBuffer<float>&, juce::MidiBuffer&);
+                         juce::AudioBuffer<float>&, juce::MidiBuffer&,
+                         float* peakAfter = nullptr);
 
 /** 串联的总延迟 = 各段之和。旁通的和空的不算。 */
 int chainLatencySamples (const ChainLink* links, int numLinks);

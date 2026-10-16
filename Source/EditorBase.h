@@ -8,12 +8,16 @@
 namespace pr
 {
 
-/** 界面皮肤。两套界面共用同一个 processor、同一套行为，只是长相和交互手感不同。 */
+/** 界面皮肤。几套界面共用同一个 processor、同一套行为，只是长相和交互手感不同。 */
 enum class Skin
 {
     grid     = 0,   ///< Bitwig The Grid 风格（深色画布 + 圆角模块）
-    hardware = 1    ///< 音频硬件拟物风（藏青面板 + 原木边框 + 旋钮 / VU 表 / 荧光屏）
+    hardware = 1,   ///< 音频硬件拟物风（藏青面板 + 原木边框 + 旋钮 / VU 表 / 荧光屏）
+    rack     = 2    ///< VCV Rack 风格（导轨上的 3U 模块 + 跳线；能拖模块调串联顺序）
 };
+
+/** 菜单 / 提示里给用户看的名字。 */
+juce::String skinDisplayName (Skin);
 
 /** editor 外壳（`ParamRouletteEditor`）提供给皮肤的服务。
 
@@ -29,6 +33,9 @@ public:
     virtual void closeHostedWindows (int chainSlot) = 0;     ///< -1 = 全关
     virtual bool isHostedWindowOpen (int chainSlot) const = 0;
 
+    /** 链位挪了（`ParamRouletteProcessor::moveSlot`），子插件窗口跟着它们的插件挪。 */
+    virtual void hostedWindowsMoved (int from, int to) = 0;
+
     virtual void showScanWindow() = 0;
     virtual void showTagWindow() = 0;    ///< 插件功能标签窗口。它是"随机效果器链"的数据录入口，见 PluginTagView
 
@@ -36,7 +43,7 @@ public:
         不能在它的点击回调里把它连同整棵组件树删掉。 */
     virtual void requestSkin (Skin) = 0;
 
-    /** 两套 LookAndFeel 都归外壳、和 editor 同寿（换皮肤时还开着的工具窗口挂在上面）。 */
+    /** 每套皮肤的 LookAndFeel 都归外壳、和 editor 同寿（换皮肤时还开着的工具窗口挂在上面）。 */
     virtual juce::LookAndFeel_V4& lookAndFeelFor (Skin) = 0;
 };
 
@@ -114,6 +121,15 @@ protected:
     void doRoll();
     void doHistory (bool back);
 
+    /** 掷完一次之后（按钮、R 键都走这里）。Rack 外观用它让大按钮的灯闪一下。 */
+    virtual void rolled() {}
+
+    /** 给一个链位挑插件。默认是插件菜单；Rack 外观换成它的模块浏览器。 */
+    virtual void choosePlugin (int chainSlot, juce::Component* anchor) { showPluginMenu (chainSlot, anchor); }
+
+    /** 「外观」菜单：列出全部皮肤，当前这套打勾。 */
+    void showSkinMenu (juce::Component& anchor, Skin current);
+
     void showPluginMenu (int chainSlot, juce::Component* anchor);
     void showModuleMenu (int chainSlot);
     void loadDescription (int chainSlot, const juce::PluginDescription&);
@@ -133,6 +149,7 @@ protected:
 
     void promptSaveChainPreset();
     void showChainPresetMenu (juce::Component& anchor);
+    void loadChainPresetFile (const juce::File&);
 
     void selectPreset (int index);
     void setSlotBypass (int chainSlot, bool bypassed);

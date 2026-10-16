@@ -690,6 +690,156 @@ VU 表要的电平是新加的：`processBlock` 在安全网之后量一下 RMS 
 
 ---
 
+## 第五轮：VCV Rack 皮肤（C 版，和前两套并存）
+
+第三套外观，照着 **VCV Rack 2** 做：导轨上两排 3U 模块、下垂的彩色跳线、LED 屏、
+模块浏览器、「视图」菜单里的房间亮度。Grid 和硬件两套**没动**（见下面的逐像素比对），
+外观键变成了三选一的菜单。
+
+### 视觉和手感的依据（取自 Rack 2 的源码，不是凭印象）
+
+| 东西 | 取自 | 用到的值 |
+|---|---|---|
+| 灯 / 旋钮配色 | `componentlibrary.hpp` 的 `SCHEME_*` | 红 `#ED2C24`、黄 `#FFD714`、绿 `#90C73E`、青 `#22E6EF`…… |
+| 默认线色 | `settings.cpp` | `#F3374B` `#FFB437` `#00B56E` `#3695EF` `#8B4ADE`，按顺序轮流 |
+| 线缆画法 | `CableWidget.cpp` | 二次贝塞尔，中点下坠 `(1 − 张力) × (150 + 距离)`；端点往坠点让 14 px；描边 = 颜色 ×0.8、芯 = ×0.95；整体透明度 = 不透明度^1.5；影子多坠 30 px、10% 黑；鼠标停在连着的模块上时画成不透明 |
+| 暗色 UI（菜单 / 提示 / 浏览器） | `ui/common.cpp` | 底 `#202020`、字 `#F0F0F0`，其余颜色都是两者之间按比例插出来的；文本框浅灰底深色字 |
+| LED 屏 | `LedDisplay.cpp` | `#222`→`#121212` 的渐变底、`#FFD714` 黄字 |
+| 导轨 | `RailWidget.cpp` + `Rail.svg` | 七层灰条、每 HP 一个安装孔、机架底色 `#303030` |
+| 灯和光晕 | `LightWidget.cpp` | 光晕半径 = r + min(4r, 15)，**滤色叠加**（见下面"出图之后发现的问题"） |
+| 旋钮手感 | `Knob.cpp` | 转角 ±0.83π（微调电位器 ±0.75π）；Ctrl 1/10、Shift ×4、Ctrl+Shift 1/100；拖的时候藏光标；双击复位、右键参数菜单 |
+| 选中模块 | `RackWidget.cpp` | 半透明红 + 红边 |
+| 菜单栏 / 浏览器 | `MenuBar.cpp`、`Browser.cpp` | 文字菜单 + 右侧状态；浏览器的搜索 / 厂牌 / 标签 / 排序 / 缩放 |
+| 元件 | `res/ComponentLibrary/*.svg` | RoundBlackKnob 系列、Davies1900h、Trimpot、PJ301M、Plug / PlugPort、CKSS、TL1105、VCVBezel、ScrewSilver 的颜色和比例 |
+| 面板 | Fundamental 的 `res/*.svg`（含 `*-dark.svg`） | 浅色 `#E8E8E8`、深色 `#262626`，输出插孔放在反色框里 |
+| 尺寸 | Rack 手册 [Panel](https://vcvrack.com/manual/Panel) | 1 HP = 15 px、3U = 380 px；默认窗口正好是两排 85 HP 的 100% 缩放 |
+| 快捷键 | Rack 手册 [KeyCommands](https://vcvrack.com/manual/KeyCommands) | Enter 开浏览器、Ctrl+E 旁通、拖面板挪模块 |
+
+**房间亮度**是 Rack 2 的招牌：调暗以后不发光的东西都暗下去，灯和屏照旧亮。
+代码里的规矩是所有不发光的颜色都过 `rk::shade()`，灯和 LED 屏不过。
+
+### 为了"机架"这个比喻改的底层逻辑
+
+用户说过"必须跟随美术表现修改的逻辑也一并修改"。这一轮改了这些，**都做成了通用的**
+（另外两套皮肤以后想用直接调）：
+
+| 改动 | 在哪 | 怎么验的 |
+|---|---|---|
+| **拖模块调串联顺序**（插入语义：中间的依次让位） | `ParamRouletteProcessor::moveSlot`；快照里各位的状态用同一个 `moveChainPosition` 跟着转（`SnapshotBank::moveChainPosition`）；聚焦跟着插件走（`chainPositionAfterMove`）；开着的子插件窗口也跟着转（`hostedWindowsMoved`） | 探针 5 项纯逻辑（含 36 种挪法全部比对）+ 截图工具 12 项 processor 检查 + 12 项手势检查 |
+| 加载中拒绝挪 | `moveSlot` 在 `loading` 时返回 false，界面提示"等它装完再挪" | 读代码 |
+| 子插件窗口的关闭回调按**插件**找窗口，不按链位号 | `PluginEditor::openHostedWindow` | 窗口开着的时候模块被挪走，按旧链位号会关错窗口 |
+| **每一位处理完的电平** + MIDI 活动 | `runChain` 多了个 `peakAfter` 输出（空位 / 旁通位也写，等于直通）；processor 用无锁的 `stagePeaks` 交给界面（`consumeMeterPeak` / `consumeMidiActivity`） | 探针 3 项 |
+| 模块浏览器取代插件菜单 | `EditorBase::choosePlugin` 变成虚函数，Rack 皮肤换成浏览器；装插件走同一个 `loadDescription` | 截图 + 手势检查（Enter 开 / Esc 关） |
+| 外观键变成三选一的菜单 | `EditorBase::showSkinMenu` | 截图比对 |
+| 几个共享组件开放给子类 | `SegmentedControl::segment`、`MorphPad::padArea`、`HwMemoryBank::keyRect` 改成虚函数；`ParamListView` 的行高变成实例成员 | Grid / 硬件逐像素没变 |
+
+### 截图工具（`pr_uisnap`）
+
+新增 Rack 的一组：主界面、运动模式 + 2D、空状态、最小尺寸、**深色面板 + 房间调暗**、
+**模块浏览器**、标签窗口、**菜单和提示的样式**（菜单是单独的顶层窗口截不到，
+照着 PopupMenu 的画法把 LookAndFeel 那几个函数直接调一遍）。
+"换皮肤往返"改成依次走过另外两套再回来：
+
+```
+== round trip
+  ok    06_roundtrip_grid == 01_main
+  ok    06_roundtrip_hw == hw_01_main
+  ok    06_roundtrip_rk == rk_01_main
+
+== chain move (processor)
+  ok    start: fD_F__
+  ok    moveSlot (0, 3) succeeds
+  ok    order after move: D_Ff__ (the ones in between shift left)
+  ok    focus followed fauna to position 3
+  ok    bypass moved with Pro-Q (now at 2), fauna is not bypassed
+  ok    parameter model follows the plugin
+  ok    snapshot 1: fauna's state moved to position 3
+  ok    snapshot 1: Disperser's state moved to position 0
+  ok    recalling snapshot 1 after the move restores fauna
+  ok    moveSlot (3, 0) moves it back
+  ok    and the bypass is back on position 3
+  ok    moving onto itself is refused
+
+== rack gestures
+  ok    a 3 px wiggle is not a drag yet
+  ok    past the threshold it becomes a module drag
+  ok    drag fauna onto position 3: fD_F__ -> D_fF__
+  ok    fauna keeps the focus after the drop
+  ok    drag state is cleared on mouse up
+  ok    a click without dragging only focuses
+  ok    Ctrl+Right moves the focused module right
+  ok    Ctrl+Left moves it back
+  ok    Ctrl+E bypasses the focused module
+  ok    Ctrl+E again turns it back on
+  ok    Enter opens the module browser
+  ok    Esc closes it
+```
+
+挪链位的检查放在截图工具里，是因为它是唯一能构造**真 processor + 假插件**的地方；
+"召回快照 1 之后 fauna 回到原值"这一条查的正是上一轮出过 bug 的地方（快照和链位的对应关系）。
+手势那一组用的是真的 `MouseEvent` / `KeyPress`，走 `RackChainRow` 和 `RackEditor` 的事件处理。
+
+### Grid / 硬件版到底变没变：逐像素比对
+
+拿这一轮的截图和上一轮提交的 `docs/ui-*.png` 逐像素比：
+
+| 图 | 不一样的地方 | 原因 |
+|---|---|---|
+| `01_main` / `02_motion`（Grid） | 只有顶栏一块 71×14 | 「硬件外观」键改成「外观」（点开是三选一的菜单） |
+| `hw_01_main` / `hw_02_motion`（硬件） | 只有顶栏一块 67×14 | 「Grid 外观」键改成「外观」 |
+
+### 出图之后才发现的问题（都已修）
+
+| 现象 | 原因 / 改法 |
+|---|---|
+| 浅色面板上每排灯周围一团绿雾，看着脏 | 光晕用普通的 alpha 叠加画的。Rack 的灯是**滤色**叠加（`lightColor × (1 − dest) + dest`），底越亮光晕越看不见——浅色面板上几乎没有，房间调暗 / 深色面板上才亮。JUCE 没有混合模式，改成按底色亮度压光晕的不透明度，效果一样 |
+| 链上留了空位时，长线垂进第二排、盖住随机化 / 参数表的控件 | 默认张力 0.70 → 0.80（量了 Rack 官网截图里线的垂度，大约就是这个）；另外参与下垂计算的距离封顶 320 px——这里只有两排，长线照原公式会垂得太深。短线的垂度和 Rack 一样 |
+| 快照灯键下面的「3 链位」贴着键 | 往下挪 3 px |
+| 1D morph 的快照编号压着权重曲线的端点 | 挪到轨道下面 |
+
+### UTF-8 检查又抓到两个**真**乱码
+
+`node Tools/check_utf8_literals.mjs` 报了 25 处，其中两处在界面上真的会是乱码：
+
+- 模块浏览器的悬停提示里厂牌后面那个 `·`（`brand + "  ·  "`）
+- 视图菜单里滑条的标签 `线缆张力：80%` 的那个全角冒号
+
+另外 23 处是 `const char*` 数组，用的时候过了 `fromUTF8`，运行时不会错，
+但检查工具认不出来；一并改成 `_u8`，让这个检查保持"报了就是真问题"。
+
+### pluginval：Rack 皮肤，打开界面测试
+
+| 皮肤 | `ParamRoulette.vst3` | `ParamRoulette Synth.vst3` |
+|---|---|---|
+| **Rack** | **SUCCESS**（25 组） | **SUCCESS**（25 组） |
+| Grid（复查） | **SUCCESS**（25 组） | — |
+
+跑 Rack 那一遍时临时写了皮肤偏好文件，跑完删掉了（之前你那边没有这个文件，现在也没有）。
+`Open editor whilst processing` 会在音频线程跑着的时候反复开关编辑器——Rack 皮肤的 30 Hz
+电平定时器、线缆层、浏览器都在这条路上，过了。
+
+### 回归
+
+- 两棵树全量编译：**零警告**（64 位 / 32 位所有目标）
+- 32 位探针 **92 / 92**、64 位探针 **87 / 87**（各多 8 项：每位电平 3 项 + 挪链位 5 项）；
+  fauna 那三条原始验收照旧
+- `node Tools/check_utf8_literals.mjs`：68 个文件全部干净
+- 本机已装的三个副本已更新（SHA-256 一致），旧版备份在
+  `%LOCALAPPDATA%\ParamRoulette\backup\2026-10-16T20-24-15`
+
+### 没做的 / 没法验证的
+
+- **手感没法在这边验证**：旋钮拖动的速度（基准是满量程约 400 px，比 Rack 快一倍——插件窗口比 Rack 的机架小）、
+  藏光标、拖模块的阈值（6 px），要你在 DAW 里摸过才算数
+- **电平灯截图里是摆拍的**（截图时没有音频，用测试入口把每一位摆在 −6 dB 往下）
+- 菜单的样式图是照 JUCE 的 PopupMenu 画法拼出来的，真弹出来的菜单尺寸可能差一两个像素
+- 截图是软件渲染器画的，DAW 里走 Direct2D，渐变和光晕可能略有差别
+- 浏览器里点插件装进链位走的是和另外两套皮肤同一个 `loadDescription`，
+  截图工具里只查了开 / 关（假插件条目装不上真插件）
+- 32 位那两个产物 pluginval 照旧验不了（它自己是 64 位的）
+
+---
+
 ## 两个架构，两套产物，不是同一个插件
 
 fauna 是 **32 位 VST2**。64 位进程装不了 32 位 DLL（Windows 加载器的硬限制），

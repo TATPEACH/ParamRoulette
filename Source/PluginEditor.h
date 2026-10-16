@@ -4,6 +4,7 @@
 #include "HostedPluginWindow.h"
 #include "GridLookAndFeel.h"
 #include "HardwareLookAndFeel.h"
+#include "RackLookAndFeel.h"
 
 namespace pr
 {
@@ -33,8 +34,9 @@ public:
     void setSkin (Skin);
     Skin getSkin() const noexcept { return skin; }
 
-    /** 两套皮肤的默认尺寸 / 最小尺寸。硬件皮肤的旋钮和表头比 Grid 的控件占地方，
-        最小尺寸大一点（1160×760）——再小旋钮就得缩到看不清，那就违背拟物的初衷了。 */
+    /** 各套皮肤的默认尺寸 / 最小尺寸。硬件 / Rack 皮肤的旋钮和表头比 Grid 的控件占地方，
+        最小尺寸大一点（1160×760）——再小旋钮就得缩到看不清，那就违背拟物的初衷了。
+        Rack 的默认尺寸正好是机架 100% 缩放（85 HP × 两排 3U + 菜单栏）。 */
     static juce::Point<int> defaultSize (Skin);
     static juce::Point<int> minimumSize (Skin);
 
@@ -43,6 +45,7 @@ private:
     void openHostedWindow (int chainSlot) override;
     void closeHostedWindows (int chainSlot) override;
     bool isHostedWindowOpen (int chainSlot) const override;
+    void hostedWindowsMoved (int from, int to) override;
     void showScanWindow() override;
     void showTagWindow() override;
     void requestSkin (Skin) override;
@@ -64,6 +67,7 @@ private:
     // 它们上面，LookAndFeel 先死的话那些组件手里就是悬空引用。
     GridLookAndFeel     gridLnf;
     HardwareLookAndFeel hwLnf;
+    RackLookAndFeel     rackLnf;
 
     std::array<std::unique_ptr<HostedPluginWindow>, kMaxChain> hostedWindows;
     std::unique_ptr<juce::DocumentWindow> scanWindow;

@@ -49,24 +49,36 @@ bool runLink (const ChainLink& link, juce::AudioBuffer<float>& buffer, juce::Mid
 }
 
 ChainRunResult runChain (const ChainLink* links, int numLinks,
-                         juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+                         juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi,
+                         float* peakAfter)
 {
     ChainRunResult out;
 
     if (links == nullptr)
         return out;
 
+    auto peakNow = [&buffer]
+    {
+        float p = 0.0f;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            p = juce::jmax (p, buffer.getMagnitude (ch, 0, buffer.getNumSamples()));
+        return p;
+    };
+
     for (int i = 0; i < numLinks; ++i)
     {
         const auto& link = links[i];
 
-        if (! link.isActive())
-            continue;
+        if (link.isActive())
+        {
+            if (runLink (link, buffer, midi))
+                ++out.ran;
+            else
+                ++out.skipped;
+        }
 
-        if (runLink (link, buffer, midi))
-            ++out.ran;
-        else
-            ++out.skipped;
+        if (peakAfter != nullptr)
+            peakAfter[i] = peakNow();
     }
 
     return out;

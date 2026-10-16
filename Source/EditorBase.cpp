@@ -4,6 +4,17 @@
 namespace pr
 {
 
+juce::String skinDisplayName (Skin s)
+{
+    switch (s)
+    {
+        case Skin::grid:     return "Grid"_u8;
+        case Skin::hardware: return "硬件"_u8;
+        case Skin::rack:     return "Rack"_u8;
+    }
+    return {};
+}
+
 juce::String semanticHint (MotionSemantic s)
 {
     switch (s)
@@ -364,6 +375,33 @@ void EditorBase::doRoll()
 
     note.clear();
     proc.randomizeNow();    // 已经在消息线程上，直接来
+    rolled();
+}
+
+void EditorBase::showSkinMenu (juce::Component& anchor, Skin current)
+{
+    juce::PopupMenu m;
+    m.addSectionHeader ("外观（功能完全一样，随时换）"_u8);
+
+    const std::pair<Skin, juce::String> all[] =
+    {
+        { Skin::grid,     "Grid —— 深色画布 + 圆角模块"_u8 },
+        { Skin::hardware, "硬件 —— 藏青面板、旋钮、VU 表"_u8 },
+        { Skin::rack,     "Rack —— VCV 式机架，能拖模块调顺序"_u8 },
+    };
+
+    for (const auto& [s, text] : all)
+        m.addItem (1 + (int) s, text, true, s == current);
+
+    juce::Component::SafePointer<EditorBase> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&anchor), [safe, current] (int r)
+    {
+        auto* self = safe.getComponent();
+        if (self == nullptr || r <= 0 || (Skin) (r - 1) == current)
+            return;
+
+        self->host.requestSkin ((Skin) (r - 1));
+    });
 }
 
 void EditorBase::doHistory (bool back)
@@ -445,7 +483,7 @@ void EditorBase::showModuleMenu (int chainSlot)
                 if (open) { self->host.closeHostedWindows (chainSlot); self->updateStatus(); }
                 else      { self->host.openHostedWindow (chainSlot); }
                 break;
-            case 2: self->showPluginMenu (chainSlot, nullptr); break;
+            case 2: self->choosePlugin (chainSlot, nullptr); break;
             case 3: self->proc.setSlotBypassed (chainSlot, ! self->proc.isSlotBypassed (chainSlot)); break;
             case 4: self->doUnload (chainSlot); break;
             default: break;
@@ -706,17 +744,23 @@ void EditorBase::showChainPresetMenu (juce::Component& anchor)
             return;
         }
 
-        const auto file = files[choice - 1];
-        self->setNote ("正在读 "_u8 + file.getFileNameWithoutExtension() + " …"_u8);
+        self->loadChainPresetFile (files[choice - 1]);
+    });
+}
 
-        self->proc.loadChainPreset (file, [safe, file] (const juce::String& error)
+void EditorBase::loadChainPresetFile (const juce::File& file)
+{
+    setNote ("正在读 "_u8 + file.getFileNameWithoutExtension() + " …"_u8);
+
+    juce::Component::SafePointer<EditorBase> safe (this);
+
+    proc.loadChainPreset (file, [safe, file] (const juce::String& error)
+    {
+        if (auto* s = safe.getComponent())
         {
-            if (auto* s = safe.getComponent())
-            {
-                s->rebuildAll();
-                s->setNote (error.isEmpty() ? ("已读入 "_u8 + file.getFileNameWithoutExtension()) : error);
-            }
-        });
+            s->rebuildAll();
+            s->setNote (error.isEmpty() ? ("已读入 "_u8 + file.getFileNameWithoutExtension()) : error);
+        }
     });
 }
 

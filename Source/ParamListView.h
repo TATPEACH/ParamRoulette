@@ -84,6 +84,10 @@ public:
     static constexpr int kRowH    = 26;
     static constexpr int kHeaderH = 28;
 
+    /** 行高 / 表头高。默认就是上面两个常数；Rack 外观的列表塞在一块 3U 面板里，
+        行要密一点才看得到足够多的参数。 */
+    void setRowHeights (int row, int header) { rowH = row; headerH = header; resized(); repaint(); }
+
 protected:
     // 皮肤可以换掉的只有**画法**（硬件版的荧光屏就是子类）：交互、筛选、涂抹勾选
     // 全在这一个类里，两套皮肤用的是同一份逻辑。
@@ -137,6 +141,9 @@ protected:
     //==============================================================================
     juce::Array<ParamInfo>* model   = nullptr;
     juce::Array<bool>*      checked = nullptr;
+
+    int rowH    = kRowH;
+    int headerH = kHeaderH;
 
     juce::Viewport viewport;
     Rows           rows { *this };
